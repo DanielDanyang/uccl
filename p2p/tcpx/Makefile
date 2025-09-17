@@ -5,7 +5,7 @@ CXXFLAGS = -Wall -Wextra -std=c++11 -g -O2 -I. -I..
 LDFLAGS = -ldl -lpthread
 
 # TCPX engine shared library
-ENGINE_SRC = uccl_engine_tcpx.cc
+ENGINE_SRCS = uccl_engine_tcpx.cc tcpx_endpoint.cc
 ENGINE_LIB = libuccl_tcpx_engine.so
 
 # Python test entrypoint
@@ -16,8 +16,8 @@ PYTHON_TEST = test_tcpx_write.py
 all: $(ENGINE_LIB)
 
 # Build the TCPX engine shared library used by the Python test harness
-$(ENGINE_LIB): $(ENGINE_SRC)
-	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $< $(LDFLAGS)
+$(ENGINE_LIB): $(ENGINE_SRCS)
+	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $^ $(LDFLAGS)
 
 # Run Python smoke test
 test: run-test

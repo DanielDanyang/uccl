@@ -1,39 +1,56 @@
-# TCPX NIXL Plugin
+# TCPX Engine for UCCL
 
-This directory hosts the TCPX-backed C API that mirrors `p2p/uccl_engine.h`. It exposes the NCCL GPUDirectTCPX transport through the same surface area used by the RDMA engine (`p2p/uccl_engine.cc`), together with a lightweight smoke test.
+基于 Google NCCL GPUDirect TCPX 插件的 UCCL 引擎实现，用于云端 GPU 间的高性能通信。
 
-## Layout
-- `uccl_engine_tcpx.cc` �C production TCPX engine that talks to the NCCL GPUDirectTCPX plugin via the `ncclNet` v7 interface.
-- `uccl_engine_tcpx_nixl.cc` �C legacy minimal example kept for reference.
-- `test_tcpx_write.py` �C Python smoke test that exercises the TCPX engine through ctypes.
-- `Makefile` �C helper to build the shared libraries consumed by the smoke test.
-- `TESTING.md` �C step-by-step validation guide for cloud hosts.
+## 架构
 
-## Prerequisites
-- CUDA + PyTorch available (the smoke test moves CUDA tensors).
-- NCCL GPUDirectTCPX plugin built as a shared object (default name `libnccl-net.so`).
-- Environment variables exported before importing `uccl`:
-  ```bash
-  export UCCL_TCPX_PLUGIN_PATH=/abs/path/to/libnccl-net.so
-  export UCCL_TCPX_DEV=0
-  export UCCL_RCMODE=1
-  ```
+采用与原版 RDMA 引擎相同的架构：
+- `TcpxEndpoint` 类：封装 TCPX 插件的复杂性
+- `uccl_engine_tcpx.cc`：提供 C API 包装
+- 兼容现有的 Python 绑定和测试
 
-## Quick Start
-1. Build the TCPX glue:
-   ```bash
-   cd p2p/tcpx
-   make
-   ```
-   This produces `libuccl_tcpx_engine.so` (used by the smoke test) and the legacy sample plugin.
-2. From the repository root, run the TCPX smoke test:
-   ```bash
-   python p2p/tcpx/test_tcpx_write.py
-   ```
-3. A successful run prints `Local TCPX write test passed` after both processes finish.
+## 文件说明
 
-For multi-node procedures and troubleshooting, see `TESTING.md`.
+- `tcpx_endpoint.h/cc` - TCPX 端点类，封装 NCCL TCPX 插件
+- `uccl_engine_tcpx.cc` - UCCL 引擎 C API 实现
+- `test_tcpx_write.py` - 基本功能测试
+- `Makefile` - 编译配置
 
-## Next Steps
-- Extend `uccl_engine_tcpx.cc` with additional operations (e.g. read/FIFO helpers) in sync with `uccl_engine.h`.
-- Integrate the TCPX backend with the higher level NIXL benchmarks (`p2p/benchmarks`).
+## 编译和测试
+
+```bash
+# 编译 TCPX 引擎库
+make
+
+# 运行基本测试
+make test
+```
+
+## 环境变量
+
+```bash
+export UCCL_TCPX_PLUGIN_PATH=/path/to/libnccl-net-tcpx.so
+export UCCL_TCPX_DEV=0
+```
+
+## 使用方法
+
+1. 设置环境变量
+2. 编译引擎库
+3. 运行测试验证功能
+4. 集成到现有的 UCCL 系统中
+
+## 特性
+
+- ✅ 基本引擎创建和销毁
+- ✅ 元数据生成和解析
+- ✅ 连接建立（connect/accept）
+- ✅ 内存注册（reg/dereg）
+- 🚧 数据传输（write/recv）- 简化实现
+- 🚧 异步操作支持
+
+## 注意事项
+
+- 当前版本跳过了 NCCL 插件的初始化以避免段错误
+- 数据传输功能使用简化的占位符实现
+- 需要在有 TCPX 支持的云端环境中运行
