@@ -1,33 +1,39 @@
-# TCPX NIXL 插件
+# TCPX NIXL Plugin
 
-此目录包含实验性的胶水代码，用于在 NCCL GPUDirectTCPX 传输层之上运行 UCCL 的点对点引擎。该实现镜像了 RDMA 引擎（`p2p/uccl_engine.cc`），但将传输调用替换为 TCPX 插件入口点。
+This directory hosts the TCPX-backed C API that mirrors `p2p/uccl_engine.h`. It exposes the NCCL GPUDirectTCPX transport through the same surface area used by the RDMA engine (`p2p/uccl_engine.cc`), together with a lightweight smoke test.
 
-## 目录结构
-- `uccl_engine_tcpx_nixl.cc` - 轻量级的 TCPX 支持引擎，目前覆盖写入路径。
-- `test_tcpx_write.py` - 标准引擎写入测试的简单包装器，包含 TCPX 特定的环境检查。
-- `TESTING.md` - 云主机的端到端验证步骤。
-- `Makefile` - 本地迭代时构建共享对象的可选辅助工具。
+## Layout
+- `uccl_engine_tcpx.cc` �C production TCPX engine that talks to the NCCL GPUDirectTCPX plugin via the `ncclNet` v7 interface.
+- `uccl_engine_tcpx_nixl.cc` �C legacy minimal example kept for reference.
+- `test_tcpx_write.py` �C Python smoke test that exercises the TCPX engine through ctypes.
+- `Makefile` �C helper to build the shared libraries consumed by the smoke test.
+- `TESTING.md` �C step-by-step validation guide for cloud hosts.
 
-## 前置条件
-- 目标主机上可用的 CUDA + PyTorch（冒烟测试使用 `torch.cuda`）。
-- 构建为共享对象的 NCCL GPUDirectTCPX 插件（`libnccl-net.so` 或自定义路径）。
-- 在加载 `uccl` 之前导出环境变量 `UCCL_TCPX_PLUGIN_PATH` 和 `UCCL_TCPX_DEV`。
+## Prerequisites
+- CUDA + PyTorch available (the smoke test moves CUDA tensors).
+- NCCL GPUDirectTCPX plugin built as a shared object (default name `libnccl-net.so`).
+- Environment variables exported before importing `uccl`:
+  ```bash
+  export UCCL_TCPX_PLUGIN_PATH=/abs/path/to/libnccl-net.so
+  export UCCL_TCPX_DEV=0
+  export UCCL_RCMODE=1
+  ```
 
-## 快速开始
-1. 构建/安装 UCCL，确保 `python -c "from uccl import p2p"` 成功执行。
-2. 设置 TCPX 环境变量，例如：
+## Quick Start
+1. Build the TCPX glue:
    ```bash
-   export UCCL_TCPX_PLUGIN_PATH=/opt/tcpx/libnccl-net.so
-   export UCCL_TCPX_DEV=0
+   cd p2p/tcpx
+   make
    ```
-3. 运行 TCPX 冒烟测试：
+   This produces `libuccl_tcpx_engine.so` (used by the smoke test) and the legacy sample plugin.
+2. From the repository root, run the TCPX smoke test:
    ```bash
-   python -m p2p.tcpx.test_tcpx_write
+   python p2p/tcpx/test_tcpx_write.py
    ```
-4. 检查输出中的 "Local RDMA-WRITE test passed" 消息。
+3. A successful run prints `Local TCPX write test passed` after both processes finish.
 
-详细的检查清单（多节点验证、故障排除）请参见 `TESTING.md`。
+For multi-node procedures and troubleshooting, see `TESTING.md`.
 
-## 后续步骤
-- 一旦写入路径稳定，扩展 `uccl_engine_tcpx_nixl.cc` 以支持 accept/recv/read 路径。
-- 将引擎集成到 `p2p/benchmarks` 中的更高级别 NIXL 集成测试中。
+## Next Steps
+- Extend `uccl_engine_tcpx.cc` with additional operations (e.g. read/FIFO helpers) in sync with `uccl_engine.h`.
+- Integrate the TCPX backend with the higher level NIXL benchmarks (`p2p/benchmarks`).
