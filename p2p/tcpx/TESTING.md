@@ -33,10 +33,10 @@ Expected output:
 - The script finishes with `Local TCPX write test passed`.
 
 ## 5. Troubleshooting
-- **Import errors** ¨C reinstall UCCL (`python -m build` and `pip install dist/*.whl` or `pip install -e .`).
-- **Plugin not found** ¨C double check `UCCL_TCPX_PLUGIN_PATH` and file permissions.
-- **No TCPX device** ¨C adjust `UCCL_TCPX_DEV` based on the NIC index reported by the plugin.
-- **CUDA errors** ¨C confirm `nvidia-smi` output and `python -c "import torch; print(torch.cuda.is_available())"` are healthy.
+- **Import errors** ï¿½C reinstall UCCL (`python -m build` and `pip install dist/*.whl` or `pip install -e .`).
+- **Plugin not found** ï¿½C double check `UCCL_TCPX_PLUGIN_PATH` and file permissions.
+- **No TCPX device** ï¿½C adjust `UCCL_TCPX_DEV` based on the NIC index reported by the plugin.
+- **CUDA errors** ï¿½C confirm `nvidia-smi` output and `python -c "import torch; print(torch.cuda.is_available())"` are healthy.
 
 ## 6. Going further
 Run the NIXL benchmarks (`p2p/benchmarks/benchmark_nixl.py`) on paired hosts with the same TCPX environment variables to stress more complex transfer flows.

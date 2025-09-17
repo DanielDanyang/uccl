@@ -2,28 +2,68 @@
 
 基于 Google NCCL GPUDirect TCPX 插件的 UCCL 引擎实现，用于云端 GPU 间的高性能通信。
 
-## 架构
+## 📋 完整文件架构对应
 
-采用与原版 RDMA 引擎相同的架构：
-- `TcpxEndpoint` 类：封装 TCPX 插件的复杂性
-- `uccl_engine_tcpx.cc`：提供 C API 包装
-- 兼容现有的 Python 绑定和测试
+### 核心引擎文件
+| RDMA 原版 | TCPX 版本 | 状态 | 主要差异 |
+|-----------|-----------|------|----------|
+| `p2p/engine.h` | `p2p/tcpx/engine.h` | ✅ 已修改 | `uccl::RDMAEndpoint` → `tcpx::TcpxEndpoint` |
+| `p2p/engine.cc` | `p2p/tcpx/engine.cc` | ❌ 缺失 | 需要复制并修改 RDMA 调用 |
+| `p2p/pybind_engine.cc` | `p2p/tcpx/pybind_engine.cc` | ❌ 缺失 | 需要复制 Python 绑定 |
 
-## 文件说明
+### 传输层文件
+| RDMA 原版 | TCPX 版本 | 状态 | 主要差异 |
+|-----------|-----------|------|----------|
+| `rdma/transport.h` | `p2p/tcpx/tcpx_interface.h` | ✅ 已创建 | RDMA verbs → TCPX 插件接口 |
+| `rdma/transport.cc` | `p2p/tcpx/tcpx_transport.cc` | ❌ 缺失 | 需要实现 TCPX 传输层 |
 
-- `tcpx_endpoint.h/cc` - TCPX 端点类，封装 NCCL TCPX 插件
-- `uccl_engine_tcpx.cc` - UCCL 引擎 C API 实现
+### 现有文件说明
+- `engine.h/cc` - 主引擎类，与 RDMA 版本接口相同
+- `tcpx_interface.h` - 简化的 TCPX 插件接口定义
+- `tcpx_transport.cc` - TCPX 传输层实现 (TcpxEndpoint 类)
+- `pybind_engine.cc` - Python 绑定，与 RDMA 版本相同
+- `uccl_engine_tcpx.h/cc` - UCCL 引擎 C API 实现
 - `test_tcpx_write.py` - 基本功能测试
 - `Makefile` - 编译配置
+
+### 旧文件 (可能需要清理)
+- `tcpx_endpoint.h/cc` - 旧版实现，已被 tcpx_transport.cc 替代
+- `tcpx_engine.cc` - 旧版 C API，已被 uccl_engine_tcpx.cc 替代
+- `tcpx_pybind.cc` - 旧版绑定，已被 pybind_engine.cc 替代
+
+## 🏗️ 完整架构对比
+
+### 层次结构
+```
+Python 应用层: collective.py, transfer.py (相同)
+     ↓
+Python 绑定层: pybind_engine.cc (相同接口)
+     ↓
+C++ 引擎层: engine.h/cc (相同接口)
+     ↓
+传输抽象层: RDMA: rdma/transport.cc ←→ TCPX: tcpx_transport.cc
+     ↓
+底层传输: InfiniBand verbs ←→ NCCL TCPX Plugin
+```
+
+### 关键差异
+
+| 组件 | RDMA 版本 | TCPX 版本 | 差异说明 |
+|------|-----------|-----------|----------|
+| **传输类** | `uccl::RDMAEndpoint` | `tcpx::TcpxEndpoint` | 接口相同，底层不同 |
+| **连接建立** | `uccl_connect()` | `tcpx_connect()` | RDMA verbs vs TCPX plugin |
+| **内存注册** | `ibv_reg_mr()` | `tcpxRegMr()` | 支持 GPU 内存 |
+| **数据传输** | `ibv_post_send()` | `tcpxIsend()` | 异步操作 |
+| **设备管理** | `uccl::RDMAFactory` | `tcpx::TcpxFactory` | 设备发现和管理 |
 
 ## 编译和测试
 
 ```bash
 # 编译 TCPX 引擎库
-make
+make clean && make
 
 # 运行基本测试
-make test
+python test_tcpx_write.py
 ```
 
 ## 环境变量

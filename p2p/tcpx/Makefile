@@ -1,11 +1,11 @@
 # TCPX NIXL Plugin Makefile
 
 CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++14 -g -O2 -I. -I..
+CXXFLAGS = -Wall -Wextra -std=c++14 -g -O2 -I. -I.. -I../../nccl-plugin-gpudirecttcpx/src -I../../rdma
 LDFLAGS = -ldl -lpthread
 
 # TCPX engine shared library
-ENGINE_SRCS = uccl_engine_tcpx.cc tcpx_endpoint.cc
+ENGINE_SRCS = engine.cc tcpx_transport_simple.cc pybind_engine.cc
 ENGINE_LIB = libuccl_tcpx_engine.so
 
 # Python test entrypoint
