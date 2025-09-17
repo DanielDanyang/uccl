@@ -1,7 +1,7 @@
 # TCPX NIXL Plugin Makefile
 
 CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++11 -g -O2 -I. -I..
+CXXFLAGS = -Wall -Wextra -std=c++14 -g -O2 -I. -I..
 LDFLAGS = -ldl -lpthread
 
 # TCPX engine shared library
