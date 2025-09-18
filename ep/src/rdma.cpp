@@ -37,6 +37,10 @@
 #define QKEY 0x11111111u
 
 inline uint32_t pack_imm(bool is_combine, int v15, uint16_t off16) {
+  // Pack control into 32-bit imm:
+  // [31] kind (1=combine, 0=dispatch)
+  // [30:16] signed 15-bit value (two's complement)
+  // [15:0]  slot/seq (here: lower 16 bits of wr index)
   // v15 must be in [-16384, 16383]
   uint32_t vfield = static_cast<uint32_t>(v15) & 0x7FFF;
   return (static_cast<uint32_t>(is_combine) << 31) | (vfield << 16) | off16;
@@ -45,6 +49,7 @@ inline uint32_t pack_imm(bool is_combine, int v15, uint16_t off16) {
 inline int unpack_v(int32_t imm) {
   // Layout: [31]=kind, [30:16]=v(15b), [15:0]=off
   // Drop kind (<<1), then arithmetic >>17 to sign-extend bit30
+  // Decode imm: [31] kind, [30:16] value (signed 15-bit), [15:0] offset
   return (imm << 1) >> 17;
 }
 
@@ -199,7 +204,8 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
                               IBV_ACCESS_RELAXED_ORDERING);
 #else
   S.mr = ibv_reg_mr_iova2(S.pd, gpu_buf, bytes, iova,
-                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+                          IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                              IBV_ACCESS_RELAXED_ORDERING);
 #endif
 
   if (!S.mr) {
@@ -274,8 +280,8 @@ struct ibv_qp* create_srd_qp_ex(ProxyCtx& S) {
   qp_attr_ex.qp_type = IBV_QPT_DRIVER;
 
   efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
-#define EFA_QP_LOW_LATENCY_SERVICE_LEVEL 8
-  efa_attr.sl = EFA_QP_LOW_LATENCY_SERVICE_LEVEL;
+  // #define EFA_QP_LOW_LATENCY_SERVICE_LEVEL 8
+  //   efa_attr.sl = EFA_QP_LOW_LATENCY_SERVICE_LEVEL;
   efa_attr.flags = 0;
   // If set, Receive WRs will not be consumed for RDMA write with imm.
   // efa_attr.flags |= EFADV_QP_FLAGS_UNSOLICITED_WRITE_RECV;
@@ -561,25 +567,6 @@ void modify_qp_to_rts(ProxyCtx& S, RDMAConnectionInfo* local_info) {
   struct ibv_qp_attr attr;
   memset(&attr, 0, sizeof(attr));
   attr.qp_state = IBV_QPS_RTS;
-
-#ifdef EFA
-  attr.sq_psn = 0;
-  if (ibv_modify_qp(S.qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
-    perror("Failed to modify QP to RTS");
-    exit(1);
-  }
-  if (ibv_modify_qp(S.ack_qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
-    perror("Failed to modify Ack QP to RTS");
-    exit(1);
-  }
-  if (ibv_modify_qp(S.recv_ack_qp, &attr, IBV_QP_STATE | IBV_QP_SQ_PSN)) {
-    perror("Failed to modify Receive Ack QP to RTS");
-    exit(1);
-  }
-  printf("QP modified to RTS state\n");
-  return;
-#endif
-
   attr.timeout = 14;
   attr.retry_cnt = 7;
   attr.rnr_retry = 7;
@@ -684,7 +671,8 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
       wr_ids[j] = wrs_to_post[i];
       qpx->wr_id = wrs_to_post[i];
       qpx->comp_mask = 0;
-      qpx->wr_flags = (j + 1 == k) ? IBV_SEND_SIGNALED : 0;
+      // EFA requires every WR to be signaled.
+      qpx->wr_flags = IBV_SEND_SIGNALED;
 
       uint64_t remote_addr =
           ctx->remote_addr + (cmd.req_rptr ? cmd.req_rptr : 0);
@@ -767,12 +755,12 @@ void post_rdma_async_batched(ProxyCtx& S, void* buf, size_t num_wrs,
 
       wrs[j].wr.rdma.rkey = ctx->remote_rkey;
       wrs[j].opcode = IBV_WR_RDMA_WRITE;
-      wrs[j].send_flags = 0;
+      wrs[j].send_flags = IBV_SEND_SIGNALED;
       wrs[j].next = (j + 1 < k) ? &wrs[j + 1] : nullptr;
     }
     const size_t last = k - 1;
     const uint64_t batch_tail_wr = wr_ids[last];
-    wrs[last].send_flags |= IBV_SEND_SIGNALED;
+    wrs[last].send_flags = IBV_SEND_SIGNALED;
     wrs[last].opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
     wrs[last].imm_data = htonl(static_cast<uint32_t>(batch_tail_wr));
 
@@ -836,6 +824,9 @@ void local_process_completions(ProxyCtx& S,
         //   printf("[EFA_SEND_DONE] wrid=%lu tag=0x%llx qp=0x%x\n", wrid,
         //          (wrid & kAtomicMask), wc[i].qp_num);
         // }
+        // Yang: directly done to avoid the extra ACK RTT for internode-ll.
+        const uint64_t wr_done = wc[i].wr_id;
+        acked_wrs.insert(wr_done);
       } break;
       case IBV_WC_RECV:
         if (wc[i].wc_flags & IBV_WC_WITH_IMM &&
@@ -850,19 +841,21 @@ void local_process_completions(ProxyCtx& S,
                       wr_done, slot);
               std::abort();
             }
-            auto& vec = S.wr_id_to_wr_ids[wr_done];
-            if (!vec.empty()) {
-              for (auto const& wr_id : vec) {
-                acked_wrs.insert(wr_id);
-                if (finished_wrs.find(wr_id) == finished_wrs.end()) {
-                  fprintf(stderr,
-                          "Error: finished_wrs received ACK for unknown wr_id "
-                          "%lu\n",
-                          wr_id);
-                  std::abort();
-                }
-              }
-            }
+            // wr_id in vec could already be erased in notify_gpu_completion().
+            // auto& vec = S.wr_id_to_wr_ids[wr_done];
+            // if (!vec.empty()) {
+            //   for (auto const& wr_id : vec) {
+            //     acked_wrs.insert(wr_id);
+            //     if (finished_wrs.find(wr_id) == finished_wrs.end()) {
+            //       fprintf(stderr,
+            //               "Error: finished_wrs received ACK for unknown wr_id
+            //               "
+            //               "%lu\n",
+            //               wr_id);
+            //       std::abort();
+            //     }
+            //   }
+            // }
             S.wr_id_to_wr_ids.erase(wr_done);
           }
           const uint32_t tag = wr_tag(wc[i].wr_id);
@@ -990,26 +983,21 @@ void remote_process_completions(ProxyCtx& S, int idx, CopyRingBuffer& g_ring,
     if (cqe.opcode == IBV_WC_SEND) {
       continue;
     }
-#ifdef EFA
     if (cqe.opcode == IBV_WC_RECV_RDMA_WITH_IMM &&
         ((ntohl(cqe.imm_data) >> 31) & 0x1)) {
       uint32_t imm = ntohl(cqe.imm_data);
-
-      // Decode imm: [31] kind, [30:16] value (signed 15-bit), [15:0] offset
-      // bool is_combine = unpack_kind(imm);
       int value = unpack_v(static_cast<int32_t>(imm));
       uint32_t offset = unpack_off(imm);
       size_t index = offset / sizeof(int);
       // printf(
-      //     "[EFA_RECV_ATOMIC] kind=%u value=%d offset=%u index=%zu addr=0x%llx
+      //     "[RECV_ATOMIC] kind=%u value=%d offset=%u index=%zu addr=0x%llx
       //     " "imm=0x%08x\n", (unsigned)is_combine, value, offset, index,
       //     (unsigned long long)((uintptr_t)atomic_buffer_ptr +
       //                          index * sizeof(int)),
       //     imm);
-
       auto* addr32 =
           reinterpret_cast<std::atomic<int>*>(atomic_buffer_ptr) + index;
-      addr32->fetch_add(value, std::memory_order_relaxed);
+      addr32->fetch_add(value, std::memory_order_release);
       const uint32_t tag = wr_tag(cqe.wr_id);
       ProxyCtx& S_atomic = *ctx_by_tag[tag];
       ibv_sge sge = {
@@ -1029,7 +1017,6 @@ void remote_process_completions(ProxyCtx& S, int idx, CopyRingBuffer& g_ring,
       }
       continue;
     }
-#endif
     if (cqe.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
       const uint32_t tag = wr_tag(cqe.wr_id);
       ProxyCtx& S_ack = *ctx_by_tag[tag];
@@ -1213,14 +1200,14 @@ void local_post_ack_buf(ProxyCtx& S, int depth) {
   }
 }
 
-void post_atomic_operations_efa(ProxyCtx& S,
-                                std::vector<uint64_t> const& wrs_to_post,
-                                std::vector<TransferCmd> const& cmds_to_post,
-                                std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
-                                int my_rank, int block_idx,
-                                std::unordered_set<uint64_t>& finished_wrs,
-                                std::mutex& finished_wrs_mutex,
-                                std::unordered_set<uint64_t>& acked_wrs) {
+void post_atomic_operations(ProxyCtx& S,
+                            std::vector<uint64_t> const& wrs_to_post,
+                            std::vector<TransferCmd> const& cmds_to_post,
+                            std::vector<std::unique_ptr<ProxyCtx>>& ctxs,
+                            int my_rank, int block_idx,
+                            std::unordered_set<uint64_t>& finished_wrs,
+                            std::mutex& finished_wrs_mutex,
+                            std::unordered_set<uint64_t>& acked_wrs) {
   if (cmds_to_post.size() > ProxyCtx::kMaxAtomicOps) {
     fprintf(stderr, "Too many atomic operations: %zu > %zu\n",
             cmds_to_post.size(), ProxyCtx::kMaxAtomicOps);
@@ -1243,19 +1230,14 @@ void post_atomic_operations_efa(ProxyCtx& S,
 
     ProxyCtx* ctx = ctxs[dst_rank].get();
     const size_t k = wr_ids.size();
+#ifdef EFA
     struct ibv_qp_ex* qpx = (struct ibv_qp_ex*)ctx->qp;
-
     ibv_wr_start(qpx);
     for (size_t i = 0; i < k; ++i) {
       auto const& cmd = cmds_to_post[wr_ids[i]];
       auto wr_id = wrs_to_post[wr_ids[i]];
       wr_ids[i] = wr_id;
-      // bool const is_combine = cmd.is_combine;
 
-      // Pack control into 32-bit imm:
-      // [31] kind (1=combine, 0=dispatch)
-      // [30:16] signed 15-bit value (two's complement)  <-- ensure it fits
-      // [15:0]  slot/seq (here: lower 16 bits of wr index)
       int v = static_cast<int>(cmd.value);
       if (v < -16384 || v > 16383) {
         fprintf(stderr,
@@ -1270,17 +1252,12 @@ void post_atomic_operations_efa(ProxyCtx& S,
 
       qpx->wr_id = kAtomicWrTag | (wr_id & kAtomicMask);
       qpx->comp_mask = 0;
-      qpx->wr_flags = (i + 1 == k) ? IBV_SEND_SIGNALED : 0;
+      qpx->wr_flags = IBV_SEND_SIGNALED;
 
       ibv_wr_rdma_write_imm(qpx, ctx->remote_rkey, ctx->remote_addr,
                             htonl(imm));
       ibv_wr_set_ud_addr(qpx, ctx->dst_ah, ctx->dst_qpn, QKEY);
       ibv_wr_set_sge(qpx, ctx->mr->lkey, (uintptr_t)ctx->mr->addr, 0);
-      // printf(
-      //     "[EFA_SEND_ATOMIC] wr_id=%lu dst=%d kind=%u val=%d offset=%u "
-      //     "imm=0x%08x\n",
-      //     qpx->wr_id, dst_rank, static_cast<unsigned>(is_combine), v, offset,
-      //     imm);
     }
     int ret = ibv_wr_complete(qpx);
     if (ret) {
@@ -1288,7 +1265,51 @@ void post_atomic_operations_efa(ProxyCtx& S,
               ret);
       std::abort();
     }
+#else
+    std::vector<ibv_sge> sge(k);
+    std::vector<ibv_send_wr> wr(k);
 
+    for (size_t i = 0; i < k; ++i) {
+      auto const& cmd = cmds_to_post[wr_ids[i]];
+      const uint64_t wrid = wrs_to_post[wr_ids[i]];
+      wr_ids[i] = wrid;
+
+      int v = static_cast<int>(cmd.value);
+      if (v < -16384 || v > 16383) {
+        fprintf(stderr, "value=%d won't fit in 15 bits\n", v);
+        std::abort();
+      }
+      const uint32_t off16 = static_cast<uint32_t>(cmd.req_rptr) & 0xFFFFu;
+      const uint32_t imm = pack_imm(true, v, off16);
+      sge[i].addr = reinterpret_cast<uintptr_t>(ctx->mr->addr);
+      sge[i].length = 0;
+      sge[i].lkey = ctx->mr->lkey;
+
+      std::memset(&wr[i], 0, sizeof(wr[i]));
+      wr[i].wr_id = kAtomicWrTag | (wrid & kAtomicMask);
+      wr[i].opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+      wr[i].send_flags = IBV_SEND_SIGNALED;
+      wr[i].imm_data = htonl(imm);
+      wr[i].sg_list = &sge[i];
+      wr[i].num_sge = 1;
+      wr[i].wr.rdma.remote_addr = ctx->remote_addr;
+      wr[i].wr.rdma.rkey = ctx->remote_rkey;
+      wr[i].next = (i + 1 < k) ? &wr[i + 1] : nullptr;
+    }
+    {
+      ibv_send_wr* bad = nullptr;
+      int ret = ibv_post_send(ctx->qp, &wr[0], &bad);
+      if (ret) {
+        fprintf(stderr, "ibv_post_send(atomic) failed: %d (%s)\n", ret,
+                strerror(ret));
+        if (bad)
+          fprintf(stderr, "  bad wr_id=0x%llx\n",
+                  (unsigned long long)bad->wr_id);
+        std::abort();
+      }
+    }
+#endif
+    // bookkeeping identical to your original logic
     S.posted.fetch_add(k, std::memory_order_relaxed);
     const uint64_t batch_tail_wr = wr_ids.back();
     {

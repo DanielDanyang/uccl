@@ -261,7 +261,7 @@ def detect_ib_hca():
 
 def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     if x_scales.dtype == torch.int:
-        x_scales = x_scales.view(dtype=torch.int8).to(torch.int) << 23
+        x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
         x_scales = x_scales.view(dtype=torch.float)
     x_fp32 = x_fp8.to(torch.float32).view(x_fp8.size(0), -1, 128)
     x_scales = x_scales.view(x_fp8.size(0), -1, 1)
@@ -366,6 +366,7 @@ def bench_kineto(
                     dist.all_reduce(torch.ones(1, dtype=torch.float, device="cuda"))
                 for _ in range(num_tests):
                     fn()
+                torch.cuda.synchronize()
                 prof.step()
 
     # Parse the profiling table
@@ -475,10 +476,10 @@ def initialize_uccl(scratch, scratch_nbytes, rank, num_ranks, group):
 
     time.sleep(1)
 
-    return proxies, workers
+    return proxies, workers, bench
 
 
-def destroy_uccl(proxies, workers):
+def destroy_uccl(proxies, workers, bench):
 
     device_index = int(os.environ["LOCAL_RANK"])
     if workers is not None:
