@@ -12,7 +12,6 @@
 #include "../rdma/transport.h"
 #include "tcpx_interface.h"
 
-
 // NOTE: Removed RDMA dependency #include <infiniband/verbs.h>
 #include <pybind11/pybind11.h>
 #include <atomic>

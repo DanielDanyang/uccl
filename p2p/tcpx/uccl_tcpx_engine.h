@@ -1,6 +1,7 @@
 // TCPX Engine C API - derived from the RDMA version of uccl_engine.h
 // This file was copied from p2p/uccl_engine.h and adapted for TCPX
-// Strategy: keep the RDMA interface while replacing the implementation with TCPX
+// Strategy: keep the RDMA interface while replacing the implementation with
+// TCPX
 
 #pragma once
 

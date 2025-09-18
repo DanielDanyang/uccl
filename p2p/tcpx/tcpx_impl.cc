@@ -136,8 +136,9 @@ int tcpx_listen(int dev, void* handle, void** listen_comm) {
   return rc;
 }
 
-// Note: The NCCL plugin connect API signature differs from our original assumption
-// The actual TCPX plugin uses different function names and parameters
+// Note: The NCCL plugin connect API signature differs from our original
+// assumption The actual TCPX plugin uses different function names and
+// parameters
 int tcpx_connect_v5(int dev, void* handle, void** send_comm,
                     void** send_dev_handle) {
   tcpx_dbg("tcpx_connect_v5: dev=%d handle=%p", dev, handle);

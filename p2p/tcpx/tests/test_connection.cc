@@ -18,9 +18,12 @@ char const* HANDLE_FILE = "/tmp/tcpx_handle.dat";
 
 int main(int argc, char* argv[]) {
   std::cout << "=== TCPX Connection Test ===" << std::endl;
-  std::cout << "注意：这是一个简化的连接测试" << std::endl;
-  std::cout << "实际的TCPX连接需要通过带外通信交换句柄信息" << std::endl;
-  std::cout << "当前测试主要验证API调用是否正常工作" << std::endl;
+  std::cout << "Note: this is a simplified connectivity test" << std::endl;
+  std::cout << "A real TCPX setup must exchange handles via out-of-band "
+               "communication"
+            << std::endl;
+  std::cout << "This run only verifies that the API calls behave as expected"
+            << std::endl;
 
   if (argc < 2) {
     std::cout << "Usage: " << argv[0] << " <server|client> [remote_ip]"

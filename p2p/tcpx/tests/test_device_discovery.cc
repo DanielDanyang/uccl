@@ -2,7 +2,6 @@
 #include <cstdlib>
 #include <iostream>
 
-
 int main() {
   std::cout << "=== TCPX Device Discovery Test ===" << std::endl;
 
