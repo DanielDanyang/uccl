@@ -1,3 +1,4 @@
+#include "../tcpx_handle_utils.h"
 #include "../tcpx_interface.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -15,29 +16,8 @@ struct ncclNetHandle_v7 {
   char data[NCCL_NET_HANDLE_MAXSIZE];
 };
 
-// TCPX handle structure (similar to RDMA's ucclHandle)
-struct tcpxHandle {
-  uint32_t ip_addr_u32;
-  uint16_t listen_port;
-  int remote_dev;
-  int remote_gpuidx;
-};
-
 // TCP port for handle exchange (similar to RDMA's bootstrap)
 #define TCPX_BOOTSTRAP_PORT 12345
-
-// Helper functions for network-based handle exchange
-uint32_t str_to_ip(char const* ip_str) {
-  struct in_addr addr;
-  inet_aton(ip_str, &addr);
-  return addr.s_addr;
-}
-
-std::string ip_to_str(uint32_t ip_u32) {
-  struct in_addr addr;
-  addr.s_addr = ip_u32;
-  return std::string(inet_ntoa(addr));
-}
 
 // Server: create bootstrap socket and wait for client to connect
 int create_bootstrap_server() {
@@ -169,19 +149,21 @@ int main(int argc, char* argv[]) {
     std::cout << "✓ SUCCESS: Listening on device " << dev_id << std::endl;
     std::cout << "Listen comm: " << listen_comm << std::endl;
 
-    // Create TCPX handle with connection info (similar to RDMA)
-    std::cout << "\n[Step 3] Creating TCPX handle for client..." << std::endl;
-    tcpxHandle tcpx_handle;
-    memset(&tcpx_handle, 0, sizeof(tcpx_handle));
+    // Extract connection info from TCPX handle (similar to RDMA)
+    std::cout << "\n[Step 3] Extracting TCPX connection info..." << std::endl;
 
-    // For now, use a dummy IP and port - in real implementation,
-    // this would be extracted from the TCPX listen_comm
-    tcpx_handle.ip_addr_u32 = str_to_ip("127.0.0.1");  // localhost for testing
-    tcpx_handle.listen_port = 43443;  // TCPX plugin's actual port from logs
-    tcpx_handle.remote_dev = dev_id;
-    tcpx_handle.remote_gpuidx = 0;
+    // Print handle data for debugging
+    std::cout << "TCPX handle data (first 64 bytes):" << std::endl;
+    for (int i = 0; i < 64; i++) {
+      printf("%02x ", (unsigned char)handle.data[i]);
+      if ((i + 1) % 16 == 0) printf("\n");
+    }
+    printf("\n");
 
-    // Copy TCPX handle into NCCL handle
+    // Use smart extraction from handle data
+    tcpxHandle tcpx_handle = extract_tcpx_connection_info(handle.data, dev_id);
+
+    // Copy our extracted handle into NCCL handle for transmission
     memcpy(handle.data, &tcpx_handle, sizeof(tcpx_handle));
 
     // Create bootstrap server to send handle to client
