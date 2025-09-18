@@ -5,7 +5,7 @@
 
 ## 测试阶段
 
-### 阶段1: TCPX设备发现测试 ✅ (当前阶段)
+### 阶段1: TCPX设备发现测试 ✅ (已完成)
 
 **目标**: 验证TCPX插件能够正确加载并发现设备
 
@@ -20,37 +20,56 @@ make -f Makefile.simple test_device_discovery
 
 # 运行测试 (需要设置环境变量)
 export UCCL_TCPX_DEBUG=1
-export UCCL_TCPX_PLUGIN_PATH=/path/to/libnccl-net-tcpx.so
 ./test_device_discovery
 ```
 
-**预期结果**:
-- 成功加载TCPX插件
-- 发现至少1个TCPX设备 (如果硬件支持)
-- 或者优雅地报告没有设备但插件加载成功
+**测试结果** ✅:
+- ✅ 成功加载TCPX插件 (v3.1.6._2023_09_27)
+- ✅ 发现4个TCPX设备 (eth1-eth4)
+- ✅ 网络配置完整 (208核CPU, 8个GPU, 4个网络接口)
+- ✅ 多次调用结果一致
 
-### 阶段2: Endpoint初始化测试 (下一阶段)
+### 阶段2: TCPX连接测试 🔄 (当前阶段)
+
+**目标**: 验证两个节点间能够建立TCPX连接
+
+**测试文件**:
+- `test_connection.cc` - 双节点连接测试
+
+**运行方法**:
+```bash
+# 编译连接测试
+make -f Makefile.simple test_connection
+
+# 在第一个节点上启动服务器
+export UCCL_TCPX_DEBUG=1
+./test_connection server
+
+# 在第二个节点上启动客户端 (替换为实际的服务器IP)
+export UCCL_TCPX_DEBUG=1
+./test_connection client 10.0.0.107
+```
+
+**预期结果**:
+- 服务器能够在TCPX设备上开始监听
+- 客户端能够连接到服务器
+- 建立send_comm和recv_comm通信通道
+- 优雅地清理连接资源
+
+### 阶段3: Endpoint初始化测试 (未来)
 
 **目标**: 验证Endpoint类能够使用TCPX进行初始化
 
-**当前状态**: 
+**当前状态**:
 - ✅ 已添加TCPX设备发现到构造函数
-- ⚠️ 需要注释掉更多RDMA依赖代码
+- ✅ 已注释掉部分RDMA依赖代码
+- ⚠️ 需要继续注释掉更多RDMA相关代码
 - ⚠️ 需要解决编译依赖问题
 
-**下一步**:
-1. 修复tcpx_endpoint.cc中的编译错误
-2. 注释掉所有RDMA相关的初始化代码
-3. 创建简化的Endpoint测试
-
-### 阶段3: 连接建立测试 (未来)
-
-**目标**: 实现两个节点间的TCPX连接
-
 **计划**:
-1. 实现TCPX版本的connect()函数
-2. 实现TCPX版本的accept()函数  
-3. 创建双节点连接测试
+1. 基于连接测试结果，集成到Endpoint类
+2. 实现TCPX版本的connect()和accept()函数
+3. 创建简化的Endpoint连接测试
 
 ### 阶段4: 数据传输测试 (未来)
 
@@ -79,7 +98,44 @@ export UCCL_TCPX_PLUGIN_PATH=/path/to/libnccl-net-tcpx.so
 
 ## 下一步行动
 
-1. **立即**: 运行test_device_discovery测试，验证TCPX插件加载
-2. **短期**: 修复tcpx_endpoint.cc编译问题，创建Endpoint初始化测试
-3. **中期**: 实现connect/accept函数的TCPX版本
-4. **长期**: 完整的双节点连接和数据传输测试
+### 立即可以测试的：
+
+1. **编译连接测试**:
+```bash
+make -f Makefile.simple test_connection
+```
+
+2. **测试连接API调用** (在两个节点上):
+```bash
+# 节点1 (10.0.0.107) - 服务器
+export UCCL_TCPX_DEBUG=1
+./test_connection server
+
+# 节点2 (10.0.1.25) - 客户端
+export UCCL_TCPX_DEBUG=1
+./test_connection client 10.0.0.107
+```
+
+### 预期结果：
+
+- **成功情况**: API调用成功，获得通信句柄
+- **部分成功**: API调用失败但有详细错误信息，帮助调试
+- **学习价值**: 了解TCPX连接的实际工作流程
+
+### 重要说明：
+
+当前的连接测试是**简化版本**，主要用于：
+1. 验证TCPX插件API是否可以正确调用
+2. 了解连接建立的基本流程
+3. 获得调试信息以改进实现
+
+实际的TCPX连接需要：
+1. 服务器端调用`tcpx_listen()`生成句柄
+2. 通过带外通信将句柄传递给客户端
+3. 客户端使用正确的句柄调用`tcpx_connect_v5()`
+
+### 下一步改进：
+
+1. **短期**: 实现句柄的带外交换机制
+2. **中期**: 集成到Endpoint类中
+3. **长期**: 完整的数据传输测试

@@ -11,6 +11,10 @@ test_tcpx: test_tcpx.cc tcpx_impl.cc
 test_device_discovery: test_device_discovery.cc tcpx_impl.cc
 	$(CXX) $(CXXFLAGS) -o test_device_discovery test_device_discovery.cc tcpx_impl.cc $(LIBS)
 
+# 连接测试 - 测试两个节点间的连接
+test_connection: test_connection.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o test_connection test_connection.cc tcpx_impl.cc $(LIBS)
+
 # Endpoint初始化测试 - 需要更多依赖
 # 注意：这个测试需要完整的依赖，可能无法在当前环境编译
 test_endpoint_init: test_endpoint_init.cc tcpx_endpoint.cc tcpx_impl.cc
@@ -24,14 +28,16 @@ test: test_device_discovery
 	./test_device_discovery
 
 # 运行所有测试
-test_all: test_tcpx test_device_discovery
+test_all: test_tcpx test_device_discovery test_connection
 	@echo "Running all TCPX tests..."
 	@echo "=== Test 1: Basic TCPX test ==="
 	./test_tcpx
 	@echo "=== Test 2: Device discovery test ==="
 	./test_device_discovery
+	@echo "=== Test 3: Connection test (manual) ==="
+	@echo "Run './test_connection server' on one node and './test_connection client <server_ip>' on another"
 
 clean:
-	rm -f test_tcpx test_device_discovery test_endpoint_init *.o
+	rm -f test_tcpx test_device_discovery test_connection test_endpoint_init *.o
 
 .PHONY: clean test

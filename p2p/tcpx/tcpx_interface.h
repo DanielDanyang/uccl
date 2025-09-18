@@ -11,10 +11,11 @@ extern "C" {
 int tcpx_get_device_count();
 int tcpx_load_plugin(char const* plugin_path);
 
-// 连接管理
+// 连接管理 - 使用真实的TCPX API
 int tcpx_listen(int dev, void* handle, void** listen_comm);
-int tcpx_connect(int dev, void* handle, void** send_comm, void** recv_comm);
-int tcpx_accept(void* listen_comm, void** recv_comm, void** send_comm);
+int tcpx_connect_v5(int dev, void* handle, void** send_comm,
+                    void** send_dev_handle);
+int tcpx_accept_v5(void* listen_comm, void** recv_comm, void** recv_dev_handle);
 
 // 内存注册
 int tcpx_reg_mr(void* comm, void* data, size_t size, int type, void** mhandle);

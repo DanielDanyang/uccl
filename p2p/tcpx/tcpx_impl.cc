@@ -136,27 +136,59 @@ int tcpx_listen(int dev, void* handle, void** listen_comm) {
   return rc;
 }
 
-int tcpx_connect(int dev, void* handle, void** send_comm, void** recv_comm) {
-  if (!g_net || !g_net->connect) {
-    tcpx_dbg("tcpx_connect: plugin not initialized or connect not available");
+// 注意：NCCL插件的connect API签名与我们之前假设的不同
+// 实际的TCPX插件使用不同的函数名和参数
+int tcpx_connect_v5(int dev, void* handle, void** send_comm,
+                    void** send_dev_handle) {
+  tcpx_dbg("tcpx_connect_v5: dev=%d handle=%p", dev, handle);
+
+  // 这里需要调用实际的TCPX插件函数
+  // 但是我们的g_net结构体可能不包含v5版本的函数
+  // 让我们先尝试使用dlsym直接获取函数指针
+
+  if (!g_plugin_handle) {
+    tcpx_dbg("tcpx_connect_v5: plugin not loaded");
     return -1;
   }
-  tcpx_dbg("tcpx_connect: dev=%d", dev);
-  int rc = g_net->connect(dev, handle, send_comm, recv_comm);
-  tcpx_dbg("tcpx_connect: rc=%d send_comm=%p recv_comm=%p", rc, *send_comm,
-           *recv_comm);
+
+  // 尝试获取tcpxConnect_v5函数
+  typedef int (*tcpxConnect_v5_fn)(int, void*, void**, void**);
+  tcpxConnect_v5_fn connect_fn =
+      (tcpxConnect_v5_fn)dlsym(g_plugin_handle, "tcpxConnect_v5");
+
+  if (!connect_fn) {
+    tcpx_dbg("tcpxConnect_v5 function not found: %s", dlerror());
+    return -1;
+  }
+
+  int rc = connect_fn(dev, handle, send_comm, send_dev_handle);
+  tcpx_dbg("tcpx_connect_v5: rc=%d send_comm=%p send_dev_handle=%p", rc,
+           *send_comm, *send_dev_handle);
   return rc;
 }
 
-int tcpx_accept(void* listen_comm, void** recv_comm, void** send_comm) {
-  if (!g_net || !g_net->accept) {
-    tcpx_dbg("tcpx_accept: plugin not initialized or accept not available");
+int tcpx_accept_v5(void* listen_comm, void** recv_comm,
+                   void** recv_dev_handle) {
+  tcpx_dbg("tcpx_accept_v5: listen_comm=%p", listen_comm);
+
+  if (!g_plugin_handle) {
+    tcpx_dbg("tcpx_accept_v5: plugin not loaded");
     return -1;
   }
-  tcpx_dbg("tcpx_accept: listen_comm=%p", listen_comm);
-  int rc = g_net->accept(listen_comm, recv_comm, send_comm);
-  tcpx_dbg("tcpx_accept: rc=%d recv_comm=%p send_comm=%p", rc, *recv_comm,
-           *send_comm);
+
+  // 尝试获取tcpxAccept_v5函数
+  typedef int (*tcpxAccept_v5_fn)(void*, void**, void**);
+  tcpxAccept_v5_fn accept_fn =
+      (tcpxAccept_v5_fn)dlsym(g_plugin_handle, "tcpxAccept_v5");
+
+  if (!accept_fn) {
+    tcpx_dbg("tcpxAccept_v5 function not found: %s", dlerror());
+    return -1;
+  }
+
+  int rc = accept_fn(listen_comm, recv_comm, recv_dev_handle);
+  tcpx_dbg("tcpx_accept_v5: rc=%d recv_comm=%p recv_dev_handle=%p", rc,
+           *recv_comm, *recv_dev_handle);
   return rc;
 }
 
