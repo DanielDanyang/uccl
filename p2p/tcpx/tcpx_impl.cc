@@ -224,10 +224,17 @@ int tcpx_isend(void* send_comm, void* data, int size, int tag, void* mhandle,
     tcpx_dbg("tcpx_isend: plugin not initialized or isend not available");
     return -1;
   }
+
+  // Check for null communication handle to avoid segfault
+  if (!send_comm) {
+    tcpx_dbg("tcpx_isend: send_comm is null, returning error");
+    return -1;
+  }
+
   tcpx_dbg("tcpx_isend: send_comm=%p data=%p size=%d tag=%d mhandle=%p",
            send_comm, data, size, tag, mhandle);
   int rc = g_net->isend(send_comm, data, size, tag, mhandle, request);
-  tcpx_dbg("tcpx_isend: rc=%d request=%p", rc, *request);
+  tcpx_dbg("tcpx_isend: rc=%d request=%p", rc, request ? *request : nullptr);
   return rc;
 }
 
@@ -237,9 +244,16 @@ int tcpx_irecv(void* recv_comm, int n, void** data, int* sizes, int* tags,
     tcpx_dbg("tcpx_irecv: plugin not initialized or irecv not available");
     return -1;
   }
+
+  // Check for null communication handle to avoid segfault
+  if (!recv_comm) {
+    tcpx_dbg("tcpx_irecv: recv_comm is null, returning error");
+    return -1;
+  }
+
   tcpx_dbg("tcpx_irecv: recv_comm=%p n=%d", recv_comm, n);
   int rc = g_net->irecv(recv_comm, n, data, sizes, tags, mhandles, request);
-  tcpx_dbg("tcpx_irecv: rc=%d request=%p", rc, *request);
+  tcpx_dbg("tcpx_irecv: rc=%d request=%p", rc, request ? *request : nullptr);
   return rc;
 }
 
@@ -248,8 +262,15 @@ int tcpx_test(void* request, int* done, int* size) {
     tcpx_dbg("tcpx_test: plugin not initialized or test not available");
     return -1;
   }
+
+  // Check for null request handle to avoid segfault
+  if (!request) {
+    tcpx_dbg("tcpx_test: request is null, returning error");
+    return -1;
+  }
+
   int rc = g_net->test(request, done, size);
-  if (*done) {
+  if (done && *done) {
     tcpx_dbg("tcpx_test: rc=%d done=%d size=%d", rc, *done, size ? *size : -1);
   }
   return rc;
