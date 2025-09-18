@@ -1,8 +1,25 @@
-# TCPX NIXL Plugin Makefile
+# TCPX Engine Makefile
 
-CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++14 -g -O2 -I. -I.. -I../../nccl-plugin-gpudirecttcpx/src -I../../rdma
-LDFLAGS = -ldl -lpthread
+# Compiler and flags
+CUDA_HOME ?= /usr/local/cuda
+CUDA_INC  := $(CUDA_HOME)/include
+CUDA_LIB  := $(CUDA_HOME)/lib64
+CXX := g++
+CXXFLAGS := -O3 -shared -std=c++17 -fPIC -I../../include -I../../rdma -I$(CUDA_INC) \
+	-I../../nccl-plugin-gpudirecttcpx/src -I. -I.. \
+	-Wno-pointer-arith -Wno-sign-compare -Wno-unused-variable \
+	-Wl,-rpath=/usr/lib/x86_64-linux-gnu -lglog -lgflags -lgtest -lz -lelf -libverbs -lpthread
+
+# Python and pybind11 configuration
+PYTHON          ?= python3
+PYTHON_CONFIG    = $(PYTHON)-config
+PYEXT           := $(shell $(PYTHON_CONFIG) --extension-suffix)
+PYBIND11_INCLUDES := $(shell $(PYTHON) -m pybind11 --includes)
+PYTHON_LDFLAGS := $(shell $(PYTHON_CONFIG) --ldflags)
+
+LDFLAGS = -L$(CUDA_LIB) -lcudart -lcuda \
+          -Wl,-rpath,$(CUDA_LIB) -lglog -lgflags -lgtest \
+          -lz -lelf -libverbs -lpthread -ldl -lpthread
 
 # TCPX engine shared library
 ENGINE_SRCS = engine.cc tcpx_transport_minimal.cc pybind_engine.cc
@@ -17,7 +34,7 @@ all: $(ENGINE_LIB)
 
 # Build the TCPX engine shared library used by the Python test harness
 $(ENGINE_LIB): $(ENGINE_SRCS)
-	$(CXX) $(CXXFLAGS) -fPIC -shared -o $@ $^ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $(PYBIND11_INCLUDES) -o $@ $^ $(LDFLAGS)
 
 # Run Python smoke test
 test: run-test

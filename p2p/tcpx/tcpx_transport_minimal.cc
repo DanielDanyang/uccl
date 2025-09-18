@@ -2,130 +2,162 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
-#include <string>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace tcpx {
 
-// 最简化的 TcpxFactory 实现
+// TcpxFactory 实现
 std::vector<TcpxFactory::DeviceInfo> TcpxFactory::devices_;
 bool TcpxFactory::initialized_ = false;
 
 void TcpxFactory::initialize() {
-    if (initialized_) return;
-    
-    printf("[TCPX] Initializing TcpxFactory (minimal mode)\n");
-    
-    // 创建一个虚拟设备
-    devices_.resize(1);
-    devices_[0].numa_node = 0;
-    devices_[0].name = "tcpx0";
-    devices_[0].pci_path = "0000:00:00.0";
-    
-    printf("[TCPX] Created 1 virtual TCPX device\n");
-    initialized_ = true;
+  if (initialized_) return;
+
+  std::printf("[TCPX] Initializing TcpxFactory (minimal mode)\n");
+
+  // 创建一个虚拟设备
+  devices_.resize(1);
+  devices_[0].numa_node = 0;
+  devices_[0].name = "tcpx0";
+  devices_[0].pci_path = "0000:00:00.0";
+
+  std::printf("[TCPX] Created 1 virtual TCPX device\n");
+  initialized_ = true;
 }
 
 TcpxFactory::DeviceInfo* TcpxFactory::get_factory_dev(int dev_idx) {
-    initialize();
-    if (dev_idx < 0 || dev_idx >= (int)devices_.size()) {
-        return &devices_[0];  // Fallback to first device
-    }
-    return &devices_[dev_idx];
+  initialize();
+  if (dev_idx < 0 || dev_idx >= (int)devices_.size()) {
+    return &devices_[0];  // Fallback to first device
+  }
+  return &devices_[dev_idx];
+}
+
+int TcpxFactory::get_num_devices() {
+  initialize();
+  return devices_.size();
 }
 
 // 最简化的 TcpxEndpoint 实现
 struct TcpxEndpoint::Impl {
-    uint32_t num_cpus;
-    int listen_port;
-    
-    Impl(uint32_t cpus) : num_cpus(cpus), listen_port(12345) {}
+  uint32_t num_cpus;
+  int listen_port;
+
+  Impl(uint32_t cpus) : num_cpus(cpus), listen_port(12345) {}
 };
 
 TcpxEndpoint::TcpxEndpoint(uint32_t num_cpus) {
-    printf("[TCPX] Creating TcpxEndpoint with %u CPUs (minimal)\n", num_cpus);
-    impl_ = new Impl(num_cpus);
-    TcpxFactory::initialize();
+  std::printf("[TCPX] Creating TcpxEndpoint with %u CPUs (minimal)\n",
+              num_cpus);
+  impl_ = std::make_unique<Impl>(num_cpus);
+  TcpxFactory::initialize();
 }
 
 TcpxEndpoint::~TcpxEndpoint() {
-    printf("[TCPX] Destroying TcpxEndpoint\n");
-    delete impl_;
+  std::printf("[TCPX] Destroying TcpxEndpoint\n");
+  // impl_ is automatically destroyed by unique_ptr
 }
 
 int TcpxEndpoint::get_best_dev_idx(int gpu_idx) {
-    // Simple mapping: GPU index to device index
-    TcpxFactory::initialize();
-    int ndev = TcpxFactory::devices_.size();
-    return gpu_idx % ndev;
+  // Simple mapping: GPU index to device index
+  TcpxFactory::initialize();
+  int ndev = TcpxFactory::get_num_devices();
+  return gpu_idx % ndev;
 }
 
 void TcpxEndpoint::initialize_engine_by_dev(int dev_idx, bool lazy_init) {
-    printf("[TCPX] Initializing engine for device %d (lazy=%d, minimal)\n", 
-            dev_idx, lazy_init);
-    
-    impl_->listen_port = 12345 + dev_idx;
-    printf("[TCPX] Engine initialized for device %d, port %d\n", 
-            dev_idx, impl_->listen_port);
+  std::printf("[TCPX] Initializing engine for device %d (lazy=%d, minimal)\n",
+              dev_idx, lazy_init);
+
+  impl_->listen_port = 12345 + dev_idx;
+  std::printf("[TCPX] Engine initialized for device %d, port %d\n", dev_idx,
+              impl_->listen_port);
 }
 
-ConnID TcpxEndpoint::tcpx_connect(int local_dev, int local_gpu_idx, int remote_dev, 
-                                  int remote_gpu_idx, std::string const& ip_addr, int remote_port) {
-    printf("[TCPX] Connecting (minimal): local_dev=%d local_gpu=%d -> remote_dev=%d remote_gpu=%d %s:%d\n",
-            local_dev, local_gpu_idx, remote_dev, remote_gpu_idx, ip_addr.c_str(), remote_port);
-    
-    ConnID conn_id;
-    conn_id.sendComm = nullptr;
-    conn_id.recvComm = nullptr;
-    conn_id.sendDevComm = nullptr;
-    conn_id.recvDevComm = nullptr;
-    conn_id.sock_fd = -1;
-    
-    printf("[TCPX] Connection established (minimal)\n");
-    return conn_id;
+ConnID TcpxEndpoint::tcpx_connect(int local_dev, int local_gpu_idx,
+                                  int remote_dev, int remote_gpu_idx,
+                                  std::string const& ip_addr, int remote_port) {
+  std::printf(
+      "[TCPX] Connecting (minimal): local_dev=%d local_gpu=%d -> remote_dev=%d "
+      "remote_gpu=%d %s:%d\n",
+      local_dev, local_gpu_idx, remote_dev, remote_gpu_idx, ip_addr.c_str(),
+      remote_port);
+
+  ConnID conn_id;
+  conn_id.sendComm = nullptr;
+  conn_id.recvComm = nullptr;
+  conn_id.sendDevComm = nullptr;
+  conn_id.recvDevComm = nullptr;
+  conn_id.sock_fd = -1;
+
+  std::printf("[TCPX] Connection established (minimal)\n");
+  return conn_id;
 }
 
-std::unique_ptr<Mhandle> TcpxEndpoint::reg_mr(void* data, size_t size, int type) {
-    printf("[TCPX] Registering memory: data=%p size=%zu type=%d (minimal)\n", 
-            data, size, type);
-    
-    auto mhandle = std::make_unique<Mhandle>();
-    mhandle->tcpx_mhandle = nullptr;
-    mhandle->data = data;
-    mhandle->size = size;
-    mhandle->type = type;
-    
-    return mhandle;
+ConnID TcpxEndpoint::tcpx_accept(int local_dev, int local_gpu_idx,
+                                 std::string& ip_addr, int& remote_gpu_idx) {
+  std::printf("[TCPX] Accepting (minimal): local_dev=%d local_gpu=%d\n",
+              local_dev, local_gpu_idx);
+
+  // 简化：模拟接受连接
+  ip_addr = "127.0.0.1";  // 模拟远程 IP
+  remote_gpu_idx = 0;     // 模拟远程 GPU 索引
+
+  ConnID conn_id;
+  conn_id.sendComm = nullptr;
+  conn_id.recvComm = nullptr;
+  conn_id.sendDevComm = nullptr;
+  conn_id.recvDevComm = nullptr;
+  conn_id.sock_fd = -1;
+
+  std::printf("[TCPX] Connection accepted (minimal) from %s GPU %d\n",
+              ip_addr.c_str(), remote_gpu_idx);
+  return conn_id;
+}
+
+std::unique_ptr<Mhandle> TcpxEndpoint::reg_mr(void* data, size_t size,
+                                              int type) {
+  std::printf("[TCPX] Registering memory: data=%p size=%zu type=%d (minimal)\n",
+              data, size, type);
+
+  auto mhandle = std::make_unique<Mhandle>();
+  mhandle->tcpx_mhandle = nullptr;
+  mhandle->data = data;
+  mhandle->size = size;
+  mhandle->type = type;
+
+  return mhandle;
 }
 
 void TcpxEndpoint::dereg_mr(std::unique_ptr<Mhandle> mhandle) {
-    printf("[TCPX] Deregistering memory: data=%p (minimal)\n", 
-            mhandle->data);
+  std::printf("[TCPX] Deregistering memory: data=%p (minimal)\n",
+              mhandle->data);
 }
 
-bool TcpxEndpoint::send_async(ConnID const& conn_id, void* data, size_t size, 
-                             Mhandle const& mhandle, uint64_t* transfer_id) {
-    printf("[TCPX] Async send: data=%p size=%zu (minimal)\n", data, size);
-    *transfer_id = 1;  // Dummy transfer ID
-    return true;
+bool TcpxEndpoint::send_async(ConnID const& /*conn_id*/, void* data,
+                              size_t size, Mhandle const& /*mhandle*/,
+                              uint64_t* transfer_id) {
+  std::printf("[TCPX] Async send: data=%p size=%zu (minimal)\n", data, size);
+  *transfer_id = 1;  // Dummy transfer ID
+  return true;
 }
 
-bool TcpxEndpoint::recv_async(ConnID const& conn_id, void* data, size_t size,
-                             Mhandle const& mhandle, uint64_t* transfer_id) {
-    printf("[TCPX] Async recv: data=%p size=%zu (minimal)\n", data, size);
-    *transfer_id = 2;  // Dummy transfer ID
-    return true;
+bool TcpxEndpoint::recv_async(ConnID const& /*conn_id*/, void* data,
+                              size_t size, Mhandle const& /*mhandle*/,
+                              uint64_t* transfer_id) {
+  std::printf("[TCPX] Async recv: data=%p size=%zu (minimal)\n", data, size);
+  *transfer_id = 2;  // Dummy transfer ID
+  return true;
 }
 
 bool TcpxEndpoint::test_transfer(uint64_t transfer_id, bool* done) {
-    printf("[TCPX] Test transfer: id=%lu (minimal)\n", transfer_id);
-    *done = true;  // Always completed in minimal mode
-    return true;
+  std::printf("[TCPX] Test transfer: id=%lu (minimal)\n", transfer_id);
+  *done = true;  // Always completed in minimal mode
+  return true;
 }
 
-int TcpxEndpoint::get_p2p_listen_port() {
-    return impl_->listen_port;
-}
+int TcpxEndpoint::get_p2p_listen_port() { return impl_->listen_port; }
 
-} // namespace tcpx
+}  // namespace tcpx

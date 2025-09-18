@@ -104,6 +104,9 @@ class TcpxEndpoint {
                       int remote_gpu_idx, std::string const& ip_addr,
                       int remote_port);
 
+  ConnID tcpx_accept(int local_dev, int local_gpu_idx, std::string& ip_addr,
+                     int& remote_gpu_idx);
+
   // Memory registration
   std::unique_ptr<Mhandle> reg_mr(void* data, size_t size, int type);
   void dereg_mr(std::unique_ptr<Mhandle> mhandle);
@@ -134,6 +137,7 @@ class TcpxFactory {
 
   static DeviceInfo* get_factory_dev(int dev_idx);
   static void initialize();
+  static int get_num_devices();
 
  private:
   static std::vector<DeviceInfo> devices_;
