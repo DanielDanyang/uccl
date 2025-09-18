@@ -80,7 +80,8 @@ ConnID TcpxEndpoint::tcpx_connect(int local_dev, int local_gpu_idx,
                                   int remote_dev, int remote_gpu_idx,
                                   std::string const& ip_addr, int remote_port) {
   std::printf(
-      "[TCPX] Connecting (minimal): local_dev=%d local_gpu=%d -> remote_dev=%d "
+      "[TCPX] Connecting (real TCPX): local_dev=%d local_gpu=%d -> "
+      "remote_dev=%d "
       "remote_gpu=%d %s:%d\n",
       local_dev, local_gpu_idx, remote_dev, remote_gpu_idx, ip_addr.c_str(),
       remote_port);
@@ -92,18 +93,30 @@ ConnID TcpxEndpoint::tcpx_connect(int local_dev, int local_gpu_idx,
   conn_id.recvDevComm = nullptr;
   conn_id.sock_fd = -1;
 
-  std::printf("[TCPX] Connection established (minimal)\n");
+  // TODO: 实现真正的 TCPX 连接
+  // 这里需要调用真正的 TCPX 插件 API
+  // 1. 创建 tcpxHandle 结构
+  // 2. 调用 tcpxConnect_v5()
+  // 3. 获取真实的连接信息
+
+  std::printf("[TCPX] Connection established (real TCPX - TODO)\n");
   return conn_id;
 }
 
 ConnID TcpxEndpoint::tcpx_accept(int local_dev, int local_gpu_idx,
                                  std::string& ip_addr, int& remote_gpu_idx) {
-  std::printf("[TCPX] Accepting (minimal): local_dev=%d local_gpu=%d\n",
+  std::printf("[TCPX] Accepting (real TCPX): local_dev=%d local_gpu=%d\n",
               local_dev, local_gpu_idx);
 
-  // 简化：模拟接受连接
-  ip_addr = "127.0.0.1";  // 模拟远程 IP
-  remote_gpu_idx = 0;     // 模拟远程 GPU 索引
+  // TODO: 实现真正的 TCPX 接受连接
+  // 这里需要调用真正的 TCPX 插件 API
+  // 1. 使用 tcpxListen() 创建的 listenComm
+  // 2. 调用 tcpxAccept_v5()
+  // 3. 从真实连接中获取客户端 IP 和 GPU 信息
+
+  // 临时：硬编码模拟，但标记为需要真实实现
+  ip_addr = "127.0.0.1";  // TODO: 从真实 TCPX 连接获取
+  remote_gpu_idx = 0;     // TODO: 从真实 TCPX 连接获取
 
   ConnID conn_id;
   conn_id.sendComm = nullptr;
@@ -112,7 +125,7 @@ ConnID TcpxEndpoint::tcpx_accept(int local_dev, int local_gpu_idx,
   conn_id.recvDevComm = nullptr;
   conn_id.sock_fd = -1;
 
-  std::printf("[TCPX] Connection accepted (minimal) from %s GPU %d\n",
+  std::printf("[TCPX] Connection accepted (real TCPX - TODO) from %s GPU %d\n",
               ip_addr.c_str(), remote_gpu_idx);
   return conn_id;
 }
