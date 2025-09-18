@@ -1,0 +1,13 @@
+# 简化的 TCPX Makefile
+CXX = g++
+CXXFLAGS = -std=c++11 -fPIC -O2 -Wall
+LIBS = -ldl
+
+# 简单的测试程序
+test_tcpx: test_tcpx.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o test_tcpx test_tcpx.cc tcpx_impl.cc $(LIBS)
+
+clean:
+	rm -f test_tcpx *.o
+
+.PHONY: clean

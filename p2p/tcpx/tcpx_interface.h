@@ -1,53 +1,13 @@
 #pragma once
 
-#include <stdint.h>
+// 最简化的 TCPX 接口
+// 目标：替换 RDMA 传输层，让现有 p2p/engine.cc 能使用 TCPX
 
-// TCPX interface definitions
-// Based on nccl-plugin-gpudirecttcpx/src/net_tcpx.h
-
-#ifdef __cplusplus
 extern "C" {
-#endif
-
-// Forward declarations for TCPX types
-typedef int tcpxResult_t;
-typedef void* tcpxDebugLogger_t;
-typedef void* devNetDeviceHandle;
-
-// TCPX result codes (matching nccl-plugin-gpudirecttcpx)
-#define tcpxSuccess 0
-#define tcpxInternalError 1
-#define tcpxSystemError 2
-#define tcpxInvalidArgument 3
-
-// TCPX pointer types (matching nccl-plugin-gpudirecttcpx)
-#define TCPX_PTR_HOST 1
-#define TCPX_PTR_CUDA 2
-
-// TCPX network properties (simplified)
-typedef struct {
-  char* name;
-  char* pciPath;
-  uint64_t guid;
-  int ptrSupport;
-  int speed;
-  int maxComms;
-  float latency;
-  int maxRecvs;
-} tcpxNetProperties_t;
-
-// TCPX plugin function declarations
-tcpxResult_t tcpxInit(tcpxDebugLogger_t logFunction);
-tcpxResult_t tcpxDevices(int* ndev);
-tcpxResult_t tcpxGetProperties(int dev, tcpxNetProperties_t* props);
-tcpxResult_t tcpxListen(int dev, void* oHandle, void** listenComm);
-tcpxResult_t tcpxConnect_v5(int dev, void* oHandle, void** sendComm,
-                            devNetDeviceHandle** sendDevHandle);
-tcpxResult_t tcpxAccept_v5(void* listenComm, void** recvComm,
-                           devNetDeviceHandle** recvDevHandle);
-tcpxResult_t tcpxRegMr(void* ocomm, void* data, int size, int type,
-                       void** mhandle);
-tcpxResult_t tcpxDeregMr(void* comm, void* mhandle);
+// 基础函数
+int tcpx_get_device_count();
+int tcpx_load_plugin(char const* plugin_path);
+}
 tcpxResult_t tcpxIsend_v5(void* sendComm, void* data, int size, int tag,
                           void* mhandle, void** request);
 tcpxResult_t tcpxIrecv_v5(void* recvComm, int n, void** data, int* sizes,
