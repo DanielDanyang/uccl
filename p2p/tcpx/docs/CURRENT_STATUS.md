@@ -134,15 +134,66 @@ make clean && make
 python test_engine_basic.py
 ```
 
-## 📋 文件清单
+## 📋 实际代码结构分析
 
-### 核心文件 (必需)
-- `engine.h/cc` - 主引擎类
-- `tcpx_interface.h` - TCPX 接口定义
-- `tcpx_transport_minimal.cc` - 传输层实现
-- `pybind_engine.cc` - Python 绑定
-- `uccl_engine_tcpx.h/cc` - C API 包装
-- `Makefile` - 编译配置
+### 🔍 关键发现：`p2p/uccl_engine.cc` 的作用
+
+**这个文件是 RDMA 版本的 C API 实现！**
+
+```c
+// p2p/uccl_engine.cc (RDMA 版本)
+uccl_engine_t* uccl_engine_create(int local_gpu_idx, int num_cpus) {
+  uccl_engine_t* eng = new uccl_engine;
+  eng->endpoint = new Endpoint(local_gpu_idx, num_cpus);  // 调用 RDMA Endpoint
+  return eng;
+}
+```
+
+### 📁 实际文件对应关系
+
+| 层次 | RDMA 版本 | TCPX 版本 | 状态 |
+|------|-----------|-----------|------|
+| **Python 绑定** | `p2p/pybind_engine.cc` | `p2p/tcpx/pybind_engine.cc` | ✅ 存在 |
+| **C++ 引擎类** | `p2p/engine.h/cc` | `p2p/tcpx/engine.h/cc` | ✅ 存在 |
+| **C API 层** | `p2p/uccl_engine.cc` | `p2p/tcpx/uccl_engine_tcpx.cc` | ✅ 存在 |
+| **传输层** | `rdma/transport.cc` | `p2p/tcpx/tcpx_transport_minimal.cc` | ✅ 存在 |
+
+### 🔧 当前编译配置
+
+```makefile
+# p2p/tcpx/Makefile
+ENGINE_SRCS = engine.cc tcpx_transport_minimal.cc pybind_engine.cc
+ENGINE_LIB = libuccl_tcpx_engine.so
+```
+
+**问题：缺少 C API 层！**
+
+### 🚨 发现的真正 Bug 原因
+
+**`tcpx_transport_minimal.cc` 确实被使用！调用链：**
+```
+Makefile → engine.cc → tcpx::TcpxEndpoint → tcpx_transport_minimal.cc
+```
+
+**真正的问题：**
+
+1. **编译错误 - 缺少头文件**
+   ```cpp
+   // tcpx_transport_minimal.cc 中的错误
+   printf("[TCPX] ..."); // ❌ Use of undeclared identifier 'printf'
+   std::printf("[TCPX] ..."); // ❌ Use of undeclared identifier 'std'
+   ```
+
+2. **命名空间问题**
+   ```cpp
+   // 缺少正确的命名空间声明
+   std::vector<TcpxFactory::DeviceInfo> TcpxFactory::devices_; // ❌ 'std' 未声明
+   ```
+
+3. **链接问题**
+   - `engine.cc` 调用 `tcpx::TcpxEndpoint`
+   - 但 `tcpx_transport_minimal.cc` 编译失败
+   - 导致链接时找不到 `TcpxEndpoint` 的实现
 
 ### 测试文件
 - `test_nccl_plugin.py` - NCCL 插件测试 ✅
