@@ -107,8 +107,76 @@ int main(int argc, char* argv[]) {
     std::cout << "Recv comm: " << recv_comm << std::endl;
     std::cout << "Recv dev handle: " << recv_dev_handle << std::endl;
 
-    // Cleanup handle file
+    // Test data transfer - receive data from client
+    std::cout << "\n[Step 4] Testing data transfer (receive)..." << std::endl;
+
+    // Allocate receive buffer
+    int const buffer_size = 1024;
+    char* recv_buffer = new char[buffer_size];
+    memset(recv_buffer, 0, buffer_size);
+
+    // Register memory for TCPX
+    void* recv_mhandle = nullptr;
+    int rc_reg =
+        tcpx_reg_mr(recv_comm, recv_buffer, buffer_size, 0, &recv_mhandle);
+    if (rc_reg != 0) {
+      std::cout << "✗ WARNING: tcpx_reg_mr failed with rc=" << rc_reg
+                << std::endl;
+      std::cout << "Continuing without memory registration..." << std::endl;
+      recv_mhandle = nullptr;
+    } else {
+      std::cout << "✓ Memory registered for receive, mhandle=" << recv_mhandle
+                << std::endl;
+    }
+
+    // Setup receive request
+    void* recv_data[1] = {recv_buffer};
+    int recv_sizes[1] = {buffer_size};
+    int recv_tags[1] = {42};  // Match client's send tag
+    void* recv_mhandles[1] = {recv_mhandle};
+    void* recv_request = nullptr;
+
+    std::cout << "Posting receive request..." << std::endl;
+    int rc_recv = tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags,
+                             recv_mhandles, &recv_request);
+    if (rc_recv != 0) {
+      std::cout << "✗ FAILED: tcpx_irecv returned " << rc_recv << std::endl;
+    } else {
+      std::cout << "✓ Receive request posted, request=" << recv_request
+                << std::endl;
+
+      // Wait for completion
+      std::cout << "Waiting for data from client..." << std::endl;
+      int done = 0, received_size = 0;
+      int max_polls = 1000;
+      for (int i = 0; i < max_polls && !done; i++) {
+        int rc_test = tcpx_test(recv_request, &done, &received_size);
+        if (rc_test != 0) {
+          std::cout << "✗ tcpx_test failed with rc=" << rc_test << std::endl;
+          break;
+        }
+        if (!done) {
+          usleep(1000);  // 1ms delay
+        }
+      }
+
+      if (done) {
+        std::cout << "✓ SUCCESS: Received " << received_size << " bytes"
+                  << std::endl;
+        std::cout << "Data: '" << recv_buffer << "'" << std::endl;
+      } else {
+        std::cout << "✗ TIMEOUT: No data received after " << max_polls
+                  << " polls" << std::endl;
+      }
+    }
+
+    // Cleanup
+    if (recv_mhandle) {
+      tcpx_dereg_mr(recv_comm, recv_mhandle);
+    }
+    delete[] recv_buffer;
     unlink(HANDLE_FILE);
+
     std::cout << "TODO: Implement proper cleanup for TCPX connections"
               << std::endl;
 
@@ -156,8 +224,75 @@ int main(int argc, char* argv[]) {
     std::cout << "Send comm: " << send_comm << std::endl;
     std::cout << "Send dev handle: " << send_dev_handle << std::endl;
 
-    // Cleanup - use the generic tcpx_close helpers
-    // tcpx_close_send(send_comm);  // These functions may not exist
+    // Test data transfer - send data to server
+    std::cout << "\n[Step 4] Testing data transfer (send)..." << std::endl;
+
+    // Prepare test data
+    char const* test_message = "Hello from TCPX client!";
+    int const message_len =
+        strlen(test_message) + 1;  // Include null terminator
+    char* send_buffer = new char[message_len];
+    strcpy(send_buffer, test_message);
+
+    std::cout << "Sending message: '" << test_message << "' (" << message_len
+              << " bytes)" << std::endl;
+
+    // Register memory for TCPX
+    void* send_mhandle = nullptr;
+    int rc_reg =
+        tcpx_reg_mr(send_comm, send_buffer, message_len, 0, &send_mhandle);
+    if (rc_reg != 0) {
+      std::cout << "✗ WARNING: tcpx_reg_mr failed with rc=" << rc_reg
+                << std::endl;
+      std::cout << "Continuing without memory registration..." << std::endl;
+      send_mhandle = nullptr;
+    } else {
+      std::cout << "✓ Memory registered for send, mhandle=" << send_mhandle
+                << std::endl;
+    }
+
+    // Send data
+    void* send_request = nullptr;
+    int send_tag = 42;  // Match server's receive tag
+
+    std::cout << "Posting send request..." << std::endl;
+    int rc_send = tcpx_isend(send_comm, send_buffer, message_len, send_tag,
+                             send_mhandle, &send_request);
+    if (rc_send != 0) {
+      std::cout << "✗ FAILED: tcpx_isend returned " << rc_send << std::endl;
+    } else {
+      std::cout << "✓ Send request posted, request=" << send_request
+                << std::endl;
+
+      // Wait for completion
+      std::cout << "Waiting for send completion..." << std::endl;
+      int done = 0, sent_size = 0;
+      int max_polls = 1000;
+      for (int i = 0; i < max_polls && !done; i++) {
+        int rc_test = tcpx_test(send_request, &done, &sent_size);
+        if (rc_test != 0) {
+          std::cout << "✗ tcpx_test failed with rc=" << rc_test << std::endl;
+          break;
+        }
+        if (!done) {
+          usleep(1000);  // 1ms delay
+        }
+      }
+
+      if (done) {
+        std::cout << "✓ SUCCESS: Sent " << sent_size << " bytes" << std::endl;
+      } else {
+        std::cout << "✗ TIMEOUT: Send not completed after " << max_polls
+                  << " polls" << std::endl;
+      }
+    }
+
+    // Cleanup
+    if (send_mhandle) {
+      tcpx_dereg_mr(send_comm, send_mhandle);
+    }
+    delete[] send_buffer;
+
     std::cout << "TODO: Implement proper cleanup for TCPX connections"
               << std::endl;
 
