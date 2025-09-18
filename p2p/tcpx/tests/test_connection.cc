@@ -289,7 +289,6 @@ int main(int argc, char* argv[]) {
       tcpx_dereg_mr(recv_comm, recv_mhandle);
     }
     delete[] recv_buffer;
-    unlink(HANDLE_FILE);
 
     std::cout << "TODO: Implement proper cleanup for TCPX connections"
               << std::endl;
