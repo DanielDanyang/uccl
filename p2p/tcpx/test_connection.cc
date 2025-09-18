@@ -1,6 +1,7 @@
 #include "tcpx_interface.h"
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <unistd.h>
 
@@ -10,6 +11,9 @@
 struct ncclNetHandle_v7 {
   char data[NCCL_NET_HANDLE_MAXSIZE];
 };
+
+// 句柄文件路径 - 用于节点间交换连接信息
+char const* HANDLE_FILE = "/tmp/tcpx_handle.dat";
 
 int main(int argc, char* argv[]) {
   std::cout << "=== TCPX Connection Test ===" << std::endl;
@@ -64,9 +68,24 @@ int main(int argc, char* argv[]) {
     std::cout << "✓ SUCCESS: Listening on device " << dev_id << std::endl;
     std::cout << "Listen comm: " << listen_comm << std::endl;
 
+    // Save handle to file for client to use
+    std::cout << "\n[Step 3] Saving connection handle to file..." << std::endl;
+    std::ofstream handle_file(HANDLE_FILE, std::ios::binary);
+    if (!handle_file) {
+      std::cout << "✗ FAILED: Cannot create handle file " << HANDLE_FILE
+                << std::endl;
+      return 1;
+    }
+
+    handle_file.write(handle.data, NCCL_NET_HANDLE_MAXSIZE);
+    handle_file.close();
+    std::cout << "✓ SUCCESS: Handle saved to " << HANDLE_FILE << std::endl;
+
     std::cout << "\nWaiting for client connection..." << std::endl;
     std::cout << "Run client with: " << argv[0] << " client <this_server_ip>"
               << std::endl;
+    std::cout << "Press Enter when client is ready..." << std::endl;
+    std::cin.get();  // Wait for user input
 
     // Accept connection
     void* recv_comm = nullptr;
@@ -84,9 +103,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Recv comm: " << recv_comm << std::endl;
     std::cout << "Recv dev handle: " << recv_dev_handle << std::endl;
 
-    // Cleanup
-    // tcpx_close_recv(recv_comm);  // 这些函数可能不存在
-    // tcpx_close_listen(listen_comm);
+    // Cleanup handle file
+    unlink(HANDLE_FILE);
     std::cout << "TODO: Implement proper cleanup for TCPX connections"
               << std::endl;
 
@@ -99,15 +117,26 @@ int main(int argc, char* argv[]) {
     std::cout << "\n[Step 2] Starting as CLIENT..." << std::endl;
     std::cout << "Connecting to server at " << argv[2] << std::endl;
 
-    // Create connection handle for connecting
-    // 对于客户端，我们需要从服务器获取的句柄信息
-    // 这通常通过带外通信（如文件、网络等）获得
-    ncclNetHandle_v7 handle;
-    memset(&handle, 0, sizeof(handle));
+    // Load connection handle from file
+    std::cout << "\n[Step 3] Loading connection handle from file..."
+              << std::endl;
+    std::ifstream handle_file(HANDLE_FILE, std::ios::binary);
+    if (!handle_file) {
+      std::cout << "✗ FAILED: Cannot open handle file " << HANDLE_FILE
+                << std::endl;
+      std::cout << "Make sure server has created the handle file first!"
+                << std::endl;
+      std::cout << "If nodes don't share filesystem, copy the file manually:"
+                << std::endl;
+      std::cout << "  scp " << HANDLE_FILE << " user@" << argv[2] << ":"
+                << HANDLE_FILE << std::endl;
+      return 1;
+    }
 
-    // TODO: 在实际应用中，这个句柄应该从服务器的tcpx_listen获得
-    // 现在我们先用空句柄测试
-    std::cout << "Warning: Using empty handle - this may not work" << std::endl;
+    ncclNetHandle_v7 handle;
+    handle_file.read(handle.data, NCCL_NET_HANDLE_MAXSIZE);
+    handle_file.close();
+    std::cout << "✓ SUCCESS: Handle loaded from " << HANDLE_FILE << std::endl;
 
     void* send_comm = nullptr;
     void* send_dev_handle = nullptr;

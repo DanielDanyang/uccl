@@ -185,40 +185,39 @@ Endpoint::~Endpoint() {
   std::cout << "Engine destroyed" << std::endl;
 }
 
-// NOTE(TCPX): RDMA-specific connection establishment; depends on libibverbs.
+// TCPX connection establishment - replaces RDMA with TCPX transport
 bool Endpoint::connect(std::string ip_addr, int remote_gpu_idx, int remote_port,
                        uint64_t& conn_id) {
   [[maybe_unused]] auto _ =
       PyGILState_Check() ? (py::gil_scoped_release{}, nullptr) : nullptr;
 
-  std::cout << "Attempting to connect to " << ip_addr << ":" << remote_gpu_idx
-            << std::endl;
+  std::cout << "TCPX: Attempting to connect to " << ip_addr << ":"
+            << remote_gpu_idx << std::endl;
 
   // Create a new connection ID
   conn_id = next_conn_id_.fetch_add(1);
 
-  std::future<uccl::ConnID> uccl_conn_id_future = std::async(
-      std::launch::async, [this, remote_gpu_idx, &ip_addr, remote_port]() {
-        return ep_->uccl_connect(gpu_to_dev[local_gpu_idx_], local_gpu_idx_,
-                                 gpu_to_dev[remote_gpu_idx], remote_gpu_idx,
-                                 ip_addr, remote_port);
-      });
+  // TODO(TCPX): Implement TCPX connection establishment
+  // This requires:
+  // 1. Load connection handle from remote server (via OOB mechanism)
+  // 2. Call tcpx_connect_v5() with the handle
+  // 3. Store the resulting send_comm and send_dev_handle
 
-  // Check for Python signals (eg, ctrl+c) while waiting for connection
-  while (uccl_conn_id_future.wait_for(std::chrono::seconds(0)) !=
-         std::future_status::ready) {
-    check_python_signals();
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
-  uccl::ConnID uccl_conn_id = uccl_conn_id_future.get();
+  std::cout << "TCPX: Connection establishment not yet implemented"
+            << std::endl;
+  std::cout << "TCPX: Use test_connection for now to test TCPX connectivity"
+            << std::endl;
 
-  // Store the connection ID.
+  // For now, create a dummy connection entry to maintain interface
+  // compatibility
+  uccl::ConnID dummy_conn_id{nullptr, 0, 0, 0};
   {
     std::unique_lock<std::shared_mutex> lock(conn_mu_);
     conn_id_to_conn_[conn_id] =
-        new Conn{conn_id, uccl_conn_id, ip_addr, remote_gpu_idx};
+        new Conn{conn_id, dummy_conn_id, ip_addr, remote_gpu_idx};
   }
-  return true;
+
+  return false;  // Return false to indicate not yet implemented
 }
 
 // NOTE(TCPX): RDMA OOB metadata construction; replace with TCPX metadata
@@ -297,43 +296,40 @@ std::tuple<std::string, uint16_t, int> Endpoint::parse_metadata(
   }
 }
 
-// NOTE(TCPX): RDMA-specific accept path; replace with TCPX listener once
-// available.
+// TCPX accept path - replaces RDMA listener with TCPX accept
 bool Endpoint::accept(std::string& ip_addr, int& remote_gpu_idx,
                       uint64_t& conn_id) {
   [[maybe_unused]] auto _ =
       PyGILState_Check() ? (py::gil_scoped_release{}, nullptr) : nullptr;
 
-  std::cout << "Waiting to accept incoming connection..." << std::endl;
+  std::cout << "TCPX: Waiting to accept incoming connection..." << std::endl;
 
-  // For demo purposes, simulate accepted connection
   conn_id = next_conn_id_.fetch_add(1);
 
-  std::future<uccl::ConnID> uccl_conn_id_future =
-      std::async(std::launch::async, [this, &ip_addr, &remote_gpu_idx]() {
-        auto dev_idx = gpu_to_dev[local_gpu_idx_];
-        auto p2p_listen_fd = ep_->get_p2p_listen_fd(dev_idx);
-        int remote_dev_idx;
-        return ep_->uccl_accept(dev_idx, p2p_listen_fd, local_gpu_idx_, ip_addr,
-                                &remote_dev_idx, &remote_gpu_idx);
-      });
+  // TODO(TCPX): Implement TCPX accept functionality
+  // This requires:
+  // 1. Call tcpx_listen() to create a listening socket and get handle
+  // 2. Share the handle with remote client (via OOB mechanism)
+  // 3. Call tcpx_accept_v5() to accept the connection
+  // 4. Store the resulting recv_comm and recv_dev_handle
 
-  // Check for Python signals (eg, ctrl+c) while waiting for connection
-  while (uccl_conn_id_future.wait_for(std::chrono::seconds(0)) !=
-         std::future_status::ready) {
-    check_python_signals();
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
-  uccl::ConnID uccl_conn_id = uccl_conn_id_future.get();
+  std::cout << "TCPX: Accept functionality not yet implemented" << std::endl;
+  std::cout << "TCPX: Use test_connection for now to test TCPX connectivity"
+            << std::endl;
 
-  // Store the connection ID.
+  // For now, create a dummy connection entry to maintain interface
+  // compatibility
+  uccl::ConnID dummy_conn_id{nullptr, 0, 0, 0};
+  ip_addr = "127.0.0.1";  // Dummy IP
+  remote_gpu_idx = 0;     // Dummy GPU index
+
   {
     std::unique_lock<std::shared_mutex> lock(conn_mu_);
     conn_id_to_conn_[conn_id] =
-        new Conn{conn_id, uccl_conn_id, ip_addr, remote_gpu_idx};
+        new Conn{conn_id, dummy_conn_id, ip_addr, remote_gpu_idx};
   }
 
-  return true;
+  return false;  // Return false to indicate not yet implemented
 }
 
 // NOTE(TCPX): RDMA memory registration; relies on uccl::RDMAEndpoint.

@@ -98,25 +98,46 @@ export UCCL_TCPX_DEBUG=1
 
 ## 下一步行动
 
-### 🔧 修复后立即可以测试的：
+### 🎉 连接测试已完善 - 立即可用！
 
-**重要修复**：发现TCPX插件使用C++符号名，已修复`dlsym`调用。
+**重要改进**：
+- ✅ 修复了C++符号名问题
+- ✅ 解决了栈溢出问题（句柄大小128字节）
+- ✅ 实现了正确的句柄交换机制
+- ✅ 添加了同步机制和错误处理
 
-1. **重新编译连接测试**:
+1. **编译改进的连接测试**:
 ```bash
 make -f Makefile.simple clean
 make -f Makefile.simple test_connection
 ```
 
-2. **测试连接API调用** (在两个节点上):
+2. **运行连接测试**:
+
+**方法1：共享文件系统**
 ```bash
 # 节点1 (10.0.0.107) - 服务器
 export UCCL_TCPX_DEBUG=1
 ./test_connection server
+# 等待提示后按Enter
 
 # 节点2 (10.0.1.25) - 客户端
 export UCCL_TCPX_DEBUG=1
 ./test_connection client 10.0.0.107
+```
+
+**方法2：手动复制句柄文件**
+```bash
+# 步骤1：启动服务器（节点1）
+./test_connection server
+
+# 步骤2：复制句柄文件到客户端
+scp /tmp/tcpx_handle.dat user@10.0.1.25:/tmp/
+
+# 步骤3：启动客户端（节点2）
+./test_connection client 10.0.0.107
+
+# 步骤4：在服务器端按Enter完成连接
 ```
 
 ### 预期结果：

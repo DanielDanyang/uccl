@@ -19,6 +19,10 @@ test_connection: test_connection.cc tcpx_impl.cc
 test_connection_v2: test_connection_v2.cc tcpx_impl.cc
 	$(CXX) $(CXXFLAGS) -o test_connection_v2 test_connection_v2.cc tcpx_impl.cc $(LIBS)
 
+# TCPX Endpoint集成测试 - 展示如何在Endpoint类中使用TCPX
+test_endpoint_tcpx: test_endpoint_tcpx.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o test_endpoint_tcpx test_endpoint_tcpx.cc tcpx_impl.cc $(LIBS)
+
 # Endpoint初始化测试 - 需要更多依赖
 # 注意：这个测试需要完整的依赖，可能无法在当前环境编译
 test_endpoint_init: test_endpoint_init.cc tcpx_endpoint.cc tcpx_impl.cc
@@ -42,6 +46,6 @@ test_all: test_tcpx test_device_discovery test_connection
 	@echo "Run './test_connection server' on one node and './test_connection client <server_ip>' on another"
 
 clean:
-	rm -f test_tcpx test_device_discovery test_connection test_connection_v2 test_endpoint_init *.o
+	rm -f test_tcpx test_device_discovery test_connection test_connection_v2 test_endpoint_tcpx test_endpoint_init *.o
 
 .PHONY: clean test
