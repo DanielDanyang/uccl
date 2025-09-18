@@ -5,7 +5,7 @@ CXXFLAGS = -Wall -Wextra -std=c++14 -g -O2 -I. -I.. -I../../nccl-plugin-gpudirec
 LDFLAGS = -ldl -lpthread
 
 # TCPX engine shared library
-ENGINE_SRCS = engine.cc tcpx_transport_simple.cc pybind_engine.cc
+ENGINE_SRCS = engine.cc tcpx_transport_minimal.cc pybind_engine.cc
 ENGINE_LIB = libuccl_tcpx_engine.so
 
 # Python test entrypoint

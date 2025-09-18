@@ -2,17 +2,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
+#include <string>
+#include <memory>
 
 namespace tcpx {
 
-// 简化的 TcpxFactory 实现
+// 最简化的 TcpxFactory 实现
 std::vector<TcpxFactory::DeviceInfo> TcpxFactory::devices_;
 bool TcpxFactory::initialized_ = false;
 
 void TcpxFactory::initialize() {
     if (initialized_) return;
     
-    fprintf(stderr, "[TCPX] Initializing TcpxFactory (simplified mode)\n");
+    printf("[TCPX] Initializing TcpxFactory (minimal mode)\n");
     
     // 创建一个虚拟设备
     devices_.resize(1);
@@ -20,7 +23,7 @@ void TcpxFactory::initialize() {
     devices_[0].name = "tcpx0";
     devices_[0].pci_path = "0000:00:00.0";
     
-    fprintf(stderr, "[TCPX] Created 1 virtual TCPX device\n");
+    printf("[TCPX] Created 1 virtual TCPX device\n");
     initialized_ = true;
 }
 
@@ -32,7 +35,7 @@ TcpxFactory::DeviceInfo* TcpxFactory::get_factory_dev(int dev_idx) {
     return &devices_[dev_idx];
 }
 
-// 简化的 TcpxEndpoint 实现
+// 最简化的 TcpxEndpoint 实现
 struct TcpxEndpoint::Impl {
     uint32_t num_cpus;
     int listen_port;
@@ -41,13 +44,13 @@ struct TcpxEndpoint::Impl {
 };
 
 TcpxEndpoint::TcpxEndpoint(uint32_t num_cpus) {
-    fprintf(stderr, "[TCPX] Creating TcpxEndpoint with %u CPUs (simplified)\n", num_cpus);
+    printf("[TCPX] Creating TcpxEndpoint with %u CPUs (minimal)\n", num_cpus);
     impl_ = new Impl(num_cpus);
     TcpxFactory::initialize();
 }
 
 TcpxEndpoint::~TcpxEndpoint() {
-    fprintf(stderr, "[TCPX] Destroying TcpxEndpoint\n");
+    printf("[TCPX] Destroying TcpxEndpoint\n");
     delete impl_;
 }
 
@@ -59,17 +62,17 @@ int TcpxEndpoint::get_best_dev_idx(int gpu_idx) {
 }
 
 void TcpxEndpoint::initialize_engine_by_dev(int dev_idx, bool lazy_init) {
-    fprintf(stderr, "[TCPX] Initializing engine for device %d (lazy=%d, simplified)\n", 
+    printf("[TCPX] Initializing engine for device %d (lazy=%d, minimal)\n", 
             dev_idx, lazy_init);
     
     impl_->listen_port = 12345 + dev_idx;
-    fprintf(stderr, "[TCPX] Engine initialized for device %d, port %d\n", 
+    printf("[TCPX] Engine initialized for device %d, port %d\n", 
             dev_idx, impl_->listen_port);
 }
 
 ConnID TcpxEndpoint::tcpx_connect(int local_dev, int local_gpu_idx, int remote_dev, 
                                   int remote_gpu_idx, std::string const& ip_addr, int remote_port) {
-    fprintf(stderr, "[TCPX] Connecting (simplified): local_dev=%d local_gpu=%d -> remote_dev=%d remote_gpu=%d %s:%d\n",
+    printf("[TCPX] Connecting (minimal): local_dev=%d local_gpu=%d -> remote_dev=%d remote_gpu=%d %s:%d\n",
             local_dev, local_gpu_idx, remote_dev, remote_gpu_idx, ip_addr.c_str(), remote_port);
     
     ConnID conn_id;
@@ -79,12 +82,12 @@ ConnID TcpxEndpoint::tcpx_connect(int local_dev, int local_gpu_idx, int remote_d
     conn_id.recvDevComm = nullptr;
     conn_id.sock_fd = -1;
     
-    fprintf(stderr, "[TCPX] Connection established (simplified)\n");
+    printf("[TCPX] Connection established (minimal)\n");
     return conn_id;
 }
 
 std::unique_ptr<Mhandle> TcpxEndpoint::reg_mr(void* data, size_t size, int type) {
-    fprintf(stderr, "[TCPX] Registering memory: data=%p size=%zu type=%d (simplified)\n", 
+    printf("[TCPX] Registering memory: data=%p size=%zu type=%d (minimal)\n", 
             data, size, type);
     
     auto mhandle = std::make_unique<Mhandle>();
@@ -97,27 +100,27 @@ std::unique_ptr<Mhandle> TcpxEndpoint::reg_mr(void* data, size_t size, int type)
 }
 
 void TcpxEndpoint::dereg_mr(std::unique_ptr<Mhandle> mhandle) {
-    fprintf(stderr, "[TCPX] Deregistering memory: data=%p (simplified)\n", 
+    printf("[TCPX] Deregistering memory: data=%p (minimal)\n", 
             mhandle->data);
 }
 
 bool TcpxEndpoint::send_async(ConnID const& conn_id, void* data, size_t size, 
                              Mhandle const& mhandle, uint64_t* transfer_id) {
-    fprintf(stderr, "[TCPX] Async send: data=%p size=%zu (simplified)\n", data, size);
+    printf("[TCPX] Async send: data=%p size=%zu (minimal)\n", data, size);
     *transfer_id = 1;  // Dummy transfer ID
     return true;
 }
 
 bool TcpxEndpoint::recv_async(ConnID const& conn_id, void* data, size_t size,
                              Mhandle const& mhandle, uint64_t* transfer_id) {
-    fprintf(stderr, "[TCPX] Async recv: data=%p size=%zu (simplified)\n", data, size);
+    printf("[TCPX] Async recv: data=%p size=%zu (minimal)\n", data, size);
     *transfer_id = 2;  // Dummy transfer ID
     return true;
 }
 
 bool TcpxEndpoint::test_transfer(uint64_t transfer_id, bool* done) {
-    fprintf(stderr, "[TCPX] Test transfer: id=%lu (simplified)\n", transfer_id);
-    *done = true;  // Always completed in simplified mode
+    printf("[TCPX] Test transfer: id=%lu (minimal)\n", transfer_id);
+    *done = true;  // Always completed in minimal mode
     return true;
 }
 
