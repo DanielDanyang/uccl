@@ -58,15 +58,24 @@ export UCCL_TCPX_DEBUG=1
 ./tests/test_connection client 10.0.0.107
 ```
 
-**Expected Flow**:
-1. Server creates connection handle and saves to `/tmp/tcpx_handle.dat`
-2. Server waits for user confirmation
-3. Client loads handle from file (copy manually if needed)
-4. Client connects to server
-5. Server accepts connection
-6. **NEW**: Server posts receive request for data
-7. **NEW**: Client sends test message "Hello from TCPX client!"
-8. **NEW**: Both sides verify data transfer completion
+**Expected Flow (Network-based Handle Exchange)**:
+1. Server creates TCPX listening socket and handle
+2. Server creates bootstrap TCP server on port 12345
+3. Server waits for client to connect to bootstrap server
+4. Client connects to server's bootstrap socket (port 12345)
+5. Server sends TCPX handle to client via bootstrap connection
+6. Client receives handle and extracts connection info
+7. Client connects to server using TCPX handle
+8. Server accepts TCPX connection
+9. **NEW**: Server posts receive request for data
+10. **NEW**: Client sends test message "Hello from TCPX client!"
+11. **NEW**: Both sides verify data transfer completion
+
+**Key Improvements**:
+- ✅ **No shared filesystem required** - uses TCP sockets for handle exchange
+- ✅ **Network-based coordination** - similar to RDMA's bootstrap mechanism
+- ✅ **Automatic retry logic** - client retries bootstrap connection
+- ✅ **Proper error handling** - graceful failure and cleanup
 
 ## 🔍 What Each Test Validates
 
@@ -91,18 +100,16 @@ export UCCL_TCPX_DEBUG=1
 
 ### Connection Issues
 
-**Problem**: Client cannot find handle file
+**Problem**: Client cannot connect to bootstrap server
 ```
-✗ FAILED: Cannot open handle file /tmp/tcpx_handle.dat
+✗ FAILED: Cannot connect to bootstrap server
 ```
 
-**Solution**: 
-1. Ensure server has run first and created the handle
-2. If nodes don't share filesystem, copy manually:
-   ```bash
-   # On server node
-   scp /tmp/tcpx_handle.dat user@10.0.1.25:/tmp/tcpx_handle.dat
-   ```
+**Solution**:
+1. Ensure server is running and has created bootstrap server
+2. Check network connectivity: `ping 10.0.0.107`
+3. Verify port 12345 is not blocked by firewall
+4. Check if port is already in use: `netstat -an | grep 12345`
 
 **Problem**: Connection timeout or failure
 ```

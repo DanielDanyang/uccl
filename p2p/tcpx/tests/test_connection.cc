@@ -1,8 +1,10 @@
 #include "../tcpx_interface.h"
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <iostream>
+#include <sys/socket.h>
 #include <unistd.h>
 
 // NCCL network handle - used to exchange connection details
@@ -13,8 +15,104 @@ struct ncclNetHandle_v7 {
   char data[NCCL_NET_HANDLE_MAXSIZE];
 };
 
-// Handle file path - used to share connection info between nodes
-char const* HANDLE_FILE = "/tmp/tcpx_handle.dat";
+// TCPX handle structure (similar to RDMA's ucclHandle)
+struct tcpxHandle {
+  uint32_t ip_addr_u32;
+  uint16_t listen_port;
+  int remote_dev;
+  int remote_gpuidx;
+};
+
+// TCP port for handle exchange (similar to RDMA's bootstrap)
+#define TCPX_BOOTSTRAP_PORT 12345
+
+// Helper functions for network-based handle exchange
+uint32_t str_to_ip(char const* ip_str) {
+  struct in_addr addr;
+  inet_aton(ip_str, &addr);
+  return addr.s_addr;
+}
+
+std::string ip_to_str(uint32_t ip_u32) {
+  struct in_addr addr;
+  addr.s_addr = ip_u32;
+  return std::string(inet_ntoa(addr));
+}
+
+// Server: create bootstrap socket and wait for client to connect
+int create_bootstrap_server() {
+  int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (listen_fd < 0) {
+    std::cerr << "Failed to create bootstrap socket" << std::endl;
+    return -1;
+  }
+
+  int opt = 1;
+  setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_port = htons(TCPX_BOOTSTRAP_PORT);
+
+  if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    std::cerr << "Failed to bind bootstrap socket" << std::endl;
+    close(listen_fd);
+    return -1;
+  }
+
+  if (listen(listen_fd, 1) < 0) {
+    std::cerr << "Failed to listen on bootstrap socket" << std::endl;
+    close(listen_fd);
+    return -1;
+  }
+
+  std::cout << "Bootstrap server listening on port " << TCPX_BOOTSTRAP_PORT
+            << std::endl;
+
+  int client_fd = accept(listen_fd, nullptr, nullptr);
+  close(listen_fd);
+
+  if (client_fd < 0) {
+    std::cerr << "Failed to accept bootstrap connection" << std::endl;
+    return -1;
+  }
+
+  return client_fd;
+}
+
+// Client: connect to server's bootstrap socket
+int connect_to_bootstrap_server(char const* server_ip) {
+  int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock_fd < 0) {
+    std::cerr << "Failed to create bootstrap socket" << std::endl;
+    return -1;
+  }
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(TCPX_BOOTSTRAP_PORT);
+  inet_aton(server_ip, &addr.sin_addr);
+
+  // Retry connection with backoff
+  int retry = 0;
+  while (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (++retry > 10) {
+      std::cerr << "Failed to connect to bootstrap server after " << retry
+                << " retries" << std::endl;
+      close(sock_fd);
+      return -1;
+    }
+    std::cout << "Retrying bootstrap connection... (" << retry << "/10)"
+              << std::endl;
+    sleep(1);
+  }
+
+  std::cout << "Connected to bootstrap server at " << server_ip << std::endl;
+  return sock_fd;
+}
 
 int main(int argc, char* argv[]) {
   std::cout << "=== TCPX Connection Test ===" << std::endl;
@@ -56,7 +154,6 @@ int main(int argc, char* argv[]) {
     std::cout << "\n[Step 2] Starting as SERVER..." << std::endl;
 
     // Create connection handle for listening
-    // For listen, the handle is typically filled by the plugin
     ncclNetHandle_v7 handle;
     memset(&handle, 0, sizeof(handle));
 
@@ -72,24 +169,41 @@ int main(int argc, char* argv[]) {
     std::cout << "✓ SUCCESS: Listening on device " << dev_id << std::endl;
     std::cout << "Listen comm: " << listen_comm << std::endl;
 
-    // Save handle to file for client to use
-    std::cout << "\n[Step 3] Saving connection handle to file..." << std::endl;
-    std::ofstream handle_file(HANDLE_FILE, std::ios::binary);
-    if (!handle_file) {
-      std::cout << "✗ FAILED: Cannot create handle file " << HANDLE_FILE
-                << std::endl;
+    // Create TCPX handle with connection info (similar to RDMA)
+    std::cout << "\n[Step 3] Creating TCPX handle for client..." << std::endl;
+    tcpxHandle tcpx_handle;
+    memset(&tcpx_handle, 0, sizeof(tcpx_handle));
+
+    // For now, use a dummy IP and port - in real implementation,
+    // this would be extracted from the TCPX listen_comm
+    tcpx_handle.ip_addr_u32 = str_to_ip("127.0.0.1");  // localhost for testing
+    tcpx_handle.listen_port = 43443;  // TCPX plugin's actual port from logs
+    tcpx_handle.remote_dev = dev_id;
+    tcpx_handle.remote_gpuidx = 0;
+
+    // Copy TCPX handle into NCCL handle
+    memcpy(handle.data, &tcpx_handle, sizeof(tcpx_handle));
+
+    // Create bootstrap server to send handle to client
+    std::cout << "Creating bootstrap server for handle exchange..."
+              << std::endl;
+    int bootstrap_fd = create_bootstrap_server();
+    if (bootstrap_fd < 0) {
+      std::cout << "✗ FAILED: Cannot create bootstrap server" << std::endl;
       return 1;
     }
 
-    handle_file.write(handle.data, NCCL_NET_HANDLE_MAXSIZE);
-    handle_file.close();
-    std::cout << "✓ SUCCESS: Handle saved to " << HANDLE_FILE << std::endl;
+    // Send handle to client via bootstrap connection
+    std::cout << "Sending TCPX handle to client..." << std::endl;
+    ssize_t sent = send(bootstrap_fd, handle.data, NCCL_NET_HANDLE_MAXSIZE, 0);
+    if (sent != NCCL_NET_HANDLE_MAXSIZE) {
+      std::cout << "✗ FAILED: Cannot send handle to client" << std::endl;
+      close(bootstrap_fd);
+      return 1;
+    }
+    std::cout << "✓ SUCCESS: Handle sent to client" << std::endl;
 
-    std::cout << "\nWaiting for client connection..." << std::endl;
-    std::cout << "Run client with: " << argv[0] << " client <this_server_ip>"
-              << std::endl;
-    std::cout << "Press Enter when client is ready..." << std::endl;
-    std::cin.get();  // Wait for user input
+    close(bootstrap_fd);
 
     // Accept connection
     void* recv_comm = nullptr;
@@ -189,26 +303,35 @@ int main(int argc, char* argv[]) {
     std::cout << "\n[Step 2] Starting as CLIENT..." << std::endl;
     std::cout << "Connecting to server at " << argv[2] << std::endl;
 
-    // Load connection handle from file
-    std::cout << "\n[Step 3] Loading connection handle from file..."
+    // Connect to server's bootstrap socket to receive handle
+    std::cout << "\n[Step 3] Connecting to server for handle exchange..."
               << std::endl;
-    std::ifstream handle_file(HANDLE_FILE, std::ios::binary);
-    if (!handle_file) {
-      std::cout << "✗ FAILED: Cannot open handle file " << HANDLE_FILE
-                << std::endl;
-      std::cout << "Make sure server has created the handle file first!"
-                << std::endl;
-      std::cout << "If nodes don't share filesystem, copy the file manually:"
-                << std::endl;
-      std::cout << "  scp " << HANDLE_FILE << " user@" << argv[2] << ":"
-                << HANDLE_FILE << std::endl;
+    int bootstrap_fd = connect_to_bootstrap_server(argv[2]);
+    if (bootstrap_fd < 0) {
+      std::cout << "✗ FAILED: Cannot connect to bootstrap server" << std::endl;
       return 1;
     }
 
+    // Receive handle from server via bootstrap connection
+    std::cout << "Receiving TCPX handle from server..." << std::endl;
     ncclNetHandle_v7 handle;
-    handle_file.read(handle.data, NCCL_NET_HANDLE_MAXSIZE);
-    handle_file.close();
-    std::cout << "✓ SUCCESS: Handle loaded from " << HANDLE_FILE << std::endl;
+    ssize_t received =
+        recv(bootstrap_fd, handle.data, NCCL_NET_HANDLE_MAXSIZE, 0);
+    if (received != NCCL_NET_HANDLE_MAXSIZE) {
+      std::cout << "✗ FAILED: Cannot receive handle from server" << std::endl;
+      close(bootstrap_fd);
+      return 1;
+    }
+    std::cout << "✓ SUCCESS: Handle received from server" << std::endl;
+
+    close(bootstrap_fd);
+
+    // Extract TCPX handle info
+    tcpxHandle tcpx_handle;
+    memcpy(&tcpx_handle, handle.data, sizeof(tcpx_handle));
+    std::cout << "Server info - IP: " << ip_to_str(tcpx_handle.ip_addr_u32)
+              << ", Port: " << tcpx_handle.listen_port
+              << ", Dev: " << tcpx_handle.remote_dev << std::endl;
 
     void* send_comm = nullptr;
     void* send_dev_handle = nullptr;
