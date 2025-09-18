@@ -129,6 +129,68 @@ tcpxResult_t tcpxAccept_v5(void* listenComm, void** recvComm, devNetDeviceHandle
 
 ---
 
-**文档创建时间**: 2025-09-18  
-**当前状态**: 基础架构完成，正在实现真实 TCPX 插件集成  
-**下一步**: 修复设备发现和网络连接的真实实现
+目前 p2p 这一套是围绕 RDMA 写的，一个“连接”请求会从 Python 层一路调用到 uccl::RDMAEndpoint。想让它在 TCPX-only 环境下跑通，不能只改几行 glue code，至少要把下列“类/文件”换成 TCPX 版本，或提供能被它们调用的等价实现：
+
+1. p2p/engine.cc → uccl::RDMAEndpoint
+构造/析构、connect/accept、reg/recv/send 全都直接调用 RDMA 资源（libibverbs、QP、CQ）
+要支持 TCPX，必须写一个新的 C++ Endpoint（或同名类的 TCPX 变种），内部完成：
+TCPX 插件的 listen/connect/accept 握手（包括 metadata OOB、socket 交互）
+连接状态管理（发送/接收 Comm、socket、线程等）
+内存注册 / 发送 / 接收的封装
+然后让现有 Endpoint* endpoint 成员指向 TCPX 版，而不是 uccl::RDMAEndpoint
+2. p2p/uccl_engine.cc
+这里只是把 uccl_engine_* C API 转发给 Endpoint
+一旦上面的 Endpoint 换成 TCPX 实现，这里的函数基本 “照抄” 也能用；否则它仍会继续调到 RDMA 逻辑
+你可以先复制一份 TCPX 版本（如 uccl_engine_tcpx.cc），确保其中 connect/accept/reg/send/... 都调用 TCPX Endpoint
+3. p2p/pybind_engine.cc
+Python 的 p2p.Endpoint 绑定指向的是 RDMA Endpoint
+要让 Python 调用 TCPX，需要：
+要么修改这个 pybind 文件，让它根据编译开关/环境变量绑定 TCPX 版 Endpoint
+要么像你正在做的那样，在 p2p/tcpx/pybind_tcpx.cc 暴露一个独立的 TCPX 模块，并让上层脚本 import 它
+
+实际落地建议
+先实现 TCPX Endpoint（类似你在 p2p/tcpx/ 目录尝试的 minimal 版本，但要支持多个连接、metadata 编码/解析、send/recv 管理等）
+封装成 C API/pybind：可参考 uccl_engine_cc + pybind_engine.cc 的接口
+再考虑和 RDMA 分支的切换：例如编译时选项、环境变量切换，或在 uccl 包里同时暴露 Endpoint（RDMA）和 TcpxEndpoint
+
+
+推荐做法（并行 TCPX 栈）
+
+新建/使用 p2p/tcpx/ 目录，不动 RDMA 原实现。
+复制并改出三套对应文件（命名保持清晰，避免符号冲突）：
+Endpoint 层
+从 p2p/engine.cc 拆一套接口一致的 TCPX 版本，例如 p2p/tcpx/engine.cc/engine.h 中的 TcpxEndpoint（你已有雏形）。
+公开的方法签名尽量与 RDMA Endpoint 相同：构造/析构、connect/accept/get_metadata/parse_metadata/reg/dereg/send/recv/send_async/recv_async/poll_async 等，便于上层胶水直接替换。
+C API 层
+从 p2p/uccl_engine.cc 复制为 p2p/tcpx/uccl_engine_tcpx.cc（和必要的 .h），所有 uccl_engine_* 直接转发到 TcpxEndpoint。
+注意：不要与 RDMA 版 .so 同时导出同名符号（或在独立 .so 中导出，或通过不同 module 名/构建目标隔离）。
+PyBind 层
+从 p2p/pybind_engine.cc 复制为 p2p/tcpx/pybind_tcpx.cc，将 Endpoint 绑定到 TcpxEndpoint。模块名可以用 p2p_tcpx 或放在 uccl.tcpx 命名空间，避免覆盖现有 RDMA 模块。
+构建
+在 p2p/tcpx/Makefile 或 CMake 新增目标，生成独立的 pybind 模块与（如需要）C API .so，链接 -ldl。
+运行时通过 PYTHONPATH 或 import 路径选择 TCPX 模块，不影响 RDMA 栈。
+这些 .h 的改动原则
+
+RDMA 的 .h 不必大改；TCPX 版本单独提供自己的 .h，保持与 RDMA 版的类/函数签名一致（名字可以不同，如 TcpxEndpoint，但对上层胶水保持兼容）。
+uccl_engine.h 作为 C API 的“契约”可以不变（如果你在 p2p/tcpx/ 下导出相同的 uccl_engine_* 簇，放在独立 .so 即可）；或复制一份 uccl_engine_tcpx.h 供 TCPX 构建目标 include。
+哪些“include 的文件”不能直接用 net_tcpx.h，需要你自己封装
+
+不要把 nccl-plugin-gpudirecttcpx/src/net_tcpx.h 直接暴露在对外 .h 或 pybind 里（它是 NCCL 插件内部 API），否则会把插件内部符号/类型泄露到公共接口，且升级/兼容性风险大。
+正确姿势是写一个薄封装（你已在 p2p/tcpx/tcpx_impl.cc 做了）：
+用 dlopen + dlsym 解析 ncclNetPlugin_v8/v7 函数表；
+在实现文件里（.cc）调用 init/devices/listen/connect/accept/regMr/isend/irecv/test/close...；
+对上层（TcpxEndpoint）只暴露你自己的 minimal 接口（如 tcpx_get_device_count()、tcpx_listen/connect/accept 封装等）。
+不要在公共 .h 直接 include net_tcpx.h；把它限制在 .cc 内部，外部通过你定义的 wrapper 函数交互（例如你现在的 tcpx_interface.h 就是对的）。
+从 RDMA 复制后必须改的核心点
+
+Endpoint 构造/析构：去掉 RDMA 资源（verbs、QP、CQ、代理线程），换成 TCPX 的监听/连接状态与必要的线程/锁。
+OOB metadata：返回“真实 IP + 监听端口 + GPU index”。不要用 127.0.0.1；复用 RDMA OOB 获取 IP 的逻辑或自行实现。
+connect/accept：通过 socket+TCPX 插件 handle 交换接入信息，建立 sendComm/recvComm。
+reg/send/recv：用 ncclNet 的 regMr/isend/irecv/test/irecvConsumed/deregMr 流程；支持 host/device 指针判别（CUDA attrs）。
+poll：把 uccl_engine_xfer_status 等转为 net->test 轮询，并在完成后释放注册的 MR/request。
+错误映射与资源释放：保证每次失败路径都 closeSend/closeRecv/closeListen/deregMr/close(sock)。
+测试建议
+
+先在 p2p/tcpx/ 下用独立 pybind 模块/脚本调通连接（get_metadata/accept/connect），再逐步填充 send/recv。
+用环境变量（如 UCCL_TCPX_PLUGIN_PATH/UCCL_TCPX_DEV）控制插件路径与设备选择；可加 UCCL_TCPX_DEBUG 打印内部日志。
+总之，复制这三层（Endpoint/C API/PyBind）到 p2p/tcpx/ 并替换底层实现，是最快能跑通 TCPX 连接的路径；三处 .h 的改动保持谨慎（尽量不碰公共契约，或在 tcpx/ 下提供等价 .h），对外暴露接口保持与 RDMA 版兼容，上层脚本才能无感切换。

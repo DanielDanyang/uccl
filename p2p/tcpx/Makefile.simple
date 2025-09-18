@@ -1,13 +1,37 @@
 # 简化的 TCPX Makefile
 CXX = g++
-CXXFLAGS = -std=c++11 -fPIC -O2 -Wall
-LIBS = -ldl
+CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -I../include
+LIBS = -ldl -lpthread
 
-# 简单的测试程序
+# 基础测试程序 - 只测试TCPX插件加载和设备发现
 test_tcpx: test_tcpx.cc tcpx_impl.cc
 	$(CXX) $(CXXFLAGS) -o test_tcpx test_tcpx.cc tcpx_impl.cc $(LIBS)
 
-clean:
-	rm -f test_tcpx *.o
+# 设备发现测试 - 更详细的测试
+test_device_discovery: test_device_discovery.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o test_device_discovery test_device_discovery.cc tcpx_impl.cc $(LIBS)
 
-.PHONY: clean
+# Endpoint初始化测试 - 需要更多依赖
+# 注意：这个测试需要完整的依赖，可能无法在当前环境编译
+test_endpoint_init: test_endpoint_init.cc tcpx_endpoint.cc tcpx_impl.cc
+	@echo "Warning: This test requires full dependencies and may not compile"
+	@echo "Use this as a reference for testing endpoint initialization"
+	# $(CXX) $(CXXFLAGS) -o test_endpoint_init test_endpoint_init.cc tcpx_endpoint.cc tcpx_impl.cc $(LIBS)
+
+# 运行基础测试
+test: test_device_discovery
+	@echo "Running TCPX device discovery test..."
+	./test_device_discovery
+
+# 运行所有测试
+test_all: test_tcpx test_device_discovery
+	@echo "Running all TCPX tests..."
+	@echo "=== Test 1: Basic TCPX test ==="
+	./test_tcpx
+	@echo "=== Test 2: Device discovery test ==="
+	./test_device_discovery
+
+clean:
+	rm -f test_tcpx test_device_discovery test_endpoint_init *.o
+
+.PHONY: clean test
