@@ -98,10 +98,13 @@ export UCCL_TCPX_DEBUG=1
 
 ## 下一步行动
 
-### 立即可以测试的：
+### 🔧 修复后立即可以测试的：
 
-1. **编译连接测试**:
+**重要修复**：发现TCPX插件使用C++符号名，已修复`dlsym`调用。
+
+1. **重新编译连接测试**:
 ```bash
+make -f Makefile.simple clean
 make -f Makefile.simple test_connection
 ```
 

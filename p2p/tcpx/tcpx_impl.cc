@@ -151,10 +151,10 @@ int tcpx_connect_v5(int dev, void* handle, void** send_comm,
     return -1;
   }
 
-  // 尝试获取tcpxConnect_v5函数
+  // 尝试获取tcpxConnect_v5函数 - 使用C++符号名
   typedef int (*tcpxConnect_v5_fn)(int, void*, void**, void**);
-  tcpxConnect_v5_fn connect_fn =
-      (tcpxConnect_v5_fn)dlsym(g_plugin_handle, "tcpxConnect_v5");
+  tcpxConnect_v5_fn connect_fn = (tcpxConnect_v5_fn)dlsym(
+      g_plugin_handle, "_Z14tcpxConnect_v5iPvPS_PP24ncclNetDeviceHandle_v7_t");
 
   if (!connect_fn) {
     tcpx_dbg("tcpxConnect_v5 function not found: %s", dlerror());
@@ -176,10 +176,10 @@ int tcpx_accept_v5(void* listen_comm, void** recv_comm,
     return -1;
   }
 
-  // 尝试获取tcpxAccept_v5函数
+  // 尝试获取tcpxAccept_v5函数 - 使用C++符号名
   typedef int (*tcpxAccept_v5_fn)(void*, void**, void**);
-  tcpxAccept_v5_fn accept_fn =
-      (tcpxAccept_v5_fn)dlsym(g_plugin_handle, "tcpxAccept_v5");
+  tcpxAccept_v5_fn accept_fn = (tcpxAccept_v5_fn)dlsym(
+      g_plugin_handle, "_Z13tcpxAccept_v5PvPS_PP24ncclNetDeviceHandle_v7_t");
 
   if (!accept_fn) {
     tcpx_dbg("tcpxAccept_v5 function not found: %s", dlerror());
