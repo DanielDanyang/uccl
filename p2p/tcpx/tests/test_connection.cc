@@ -1,4 +1,4 @@
-#include "tcpx_interface.h"
+#include "../tcpx_interface.h"
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -6,7 +6,8 @@
 #include <unistd.h>
 
 // NCCL network handle - used to exchange connection details
-// According to the NCCL spec, the handle is typically 128 bytes (extra space avoids overflow)
+// According to the NCCL spec, the handle is typically 128 bytes (extra space
+// avoids overflow)
 #define NCCL_NET_HANDLE_MAXSIZE 128
 struct ncclNetHandle_v7 {
   char data[NCCL_NET_HANDLE_MAXSIZE];

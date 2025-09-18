@@ -1,6 +1,6 @@
 # TCPX P2P Transport Makefile
 CXX = g++
-CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -I../include
+CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -I../include -I.
 LIBS = -ldl -lpthread
 
 # Build tests
@@ -20,8 +20,8 @@ all: test_device_discovery test_connection
 test: test_device_discovery
 	./tests/test_device_discovery
 
-# Clean built files
+# Clean built files (only executables, not source code)
 clean:
-	rm -f tests/test_* *.o
+	rm -f tests/test_device_discovery tests/test_connection tests/test_tcpx *.o
 
 .PHONY: all test clean
