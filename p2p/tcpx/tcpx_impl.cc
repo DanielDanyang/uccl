@@ -124,7 +124,7 @@ int tcpx_get_device_count() {
   return rc == 0 ? ndev : -1;
 }
 
-// 连接管理函数实现
+// Connection management implementation
 int tcpx_listen(int dev, void* handle, void** listen_comm) {
   if (!g_net || !g_net->listen) {
     tcpx_dbg("tcpx_listen: plugin not initialized or listen not available");
@@ -136,22 +136,22 @@ int tcpx_listen(int dev, void* handle, void** listen_comm) {
   return rc;
 }
 
-// 注意：NCCL插件的connect API签名与我们之前假设的不同
-// 实际的TCPX插件使用不同的函数名和参数
+// Note: The NCCL plugin connect API signature differs from our original assumption
+// The actual TCPX plugin uses different function names and parameters
 int tcpx_connect_v5(int dev, void* handle, void** send_comm,
                     void** send_dev_handle) {
   tcpx_dbg("tcpx_connect_v5: dev=%d handle=%p", dev, handle);
 
-  // 这里需要调用实际的TCPX插件函数
-  // 但是我们的g_net结构体可能不包含v5版本的函数
-  // 让我们先尝试使用dlsym直接获取函数指针
+  // We need to call the real TCPX plugin function here
+  // However, our g_net structure may not expose the v5-specific functions
+  // Let's first try to get the function pointer via dlsym
 
   if (!g_plugin_handle) {
     tcpx_dbg("tcpx_connect_v5: plugin not loaded");
     return -1;
   }
 
-  // 尝试获取tcpxConnect_v5函数 - 使用C++符号名
+  // Attempt to get the tcpxConnect_v5 function using the C++ mangled name
   typedef int (*tcpxConnect_v5_fn)(int, void*, void**, void**);
   tcpxConnect_v5_fn connect_fn = (tcpxConnect_v5_fn)dlsym(
       g_plugin_handle, "_Z14tcpxConnect_v5iPvPS_PP24ncclNetDeviceHandle_v7_t");
@@ -176,7 +176,7 @@ int tcpx_accept_v5(void* listen_comm, void** recv_comm,
     return -1;
   }
 
-  // 尝试获取tcpxAccept_v5函数 - 使用C++符号名
+  // Attempt to get the tcpxAccept_v5 function using the C++ mangled name
   typedef int (*tcpxAccept_v5_fn)(void*, void**, void**);
   tcpxAccept_v5_fn accept_fn = (tcpxAccept_v5_fn)dlsym(
       g_plugin_handle, "_Z13tcpxAccept_v5PvPS_PP24ncclNetDeviceHandle_v7_t");
@@ -192,7 +192,7 @@ int tcpx_accept_v5(void* listen_comm, void** recv_comm,
   return rc;
 }
 
-// 内存注册函数实现
+// Memory registration implementation
 int tcpx_reg_mr(void* comm, void* data, size_t size, int type, void** mhandle) {
   if (!g_net || !g_net->regMr) {
     tcpx_dbg("tcpx_reg_mr: plugin not initialized or regMr not available");
@@ -216,7 +216,7 @@ int tcpx_dereg_mr(void* comm, void* mhandle) {
   return rc;
 }
 
-// 数据传输函数实现
+// Data transfer implementation
 int tcpx_isend(void* send_comm, void* data, int size, int tag, void* mhandle,
                void** request) {
   if (!g_net || !g_net->isend) {
@@ -254,7 +254,7 @@ int tcpx_test(void* request, int* done, int* size) {
   return rc;
 }
 
-// 连接清理函数实现
+// Connection cleanup implementation
 int tcpx_close_send(void* send_comm) {
   if (!g_net || !g_net->closeSend) {
     tcpx_dbg(

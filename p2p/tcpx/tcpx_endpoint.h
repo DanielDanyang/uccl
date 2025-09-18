@@ -1,8 +1,8 @@
 #pragma once
 
-// TCPX Endpoint - 基于RDMA Endpoint的接口设计，但内部使用TCPX传输
-// 这个文件是从 p2p/engine.h 复制并修改的TCPX版本
-// 策略：保持RDMA接口，将RDMA实现替换为TCPX实现
+// TCPX Endpoint - mirrors the RDMA Endpoint interface but uses TCPX internally
+// This file is copied from p2p/engine.h and adapted for the TCPX transport
+// Strategy: keep the RDMA-facing interface and swap in the TCPX implementation
 
 #include "../include/util/gpu_rt.h"
 #include "../include/util/jring.h"
@@ -13,7 +13,7 @@
 #include "tcpx_interface.h"
 
 
-// NOTE: 移除RDMA依赖 #include <infiniband/verbs.h>
+// NOTE: Removed RDMA dependency #include <infiniband/verbs.h>
 #include <pybind11/pybind11.h>
 #include <atomic>
 #include <shared_mutex>

@@ -1,65 +1,58 @@
-# TCPX Engine Makefile
+# TCPX P2P Transport Makefile
+CXX = g++
+CXXFLAGS = -std=c++17 -fPIC -O2 -Wall -I../include
+LIBS = -ldl -lpthread
 
-# Compiler and flags
-CUDA_HOME ?= /usr/local/cuda
-CUDA_INC  := $(CUDA_HOME)/include
-CUDA_LIB  := $(CUDA_HOME)/lib64
-CXX := g++
-CXXFLAGS := -O3 -shared -std=c++17 -fPIC -I../../include -I../../rdma -I$(CUDA_INC) \
-	-I../../nccl-plugin-gpudirecttcpx/src -I. -I.. \
-	-Wno-pointer-arith -Wno-sign-compare -Wno-unused-variable \
-	-Wl,-rpath=/usr/lib/x86_64-linux-gnu -lglog -lgflags -lgtest -lz -lelf -libverbs -lpthread
+# Test output directory
+TEST_DIR = tests
+TEST_BINS = $(TEST_DIR)/test_device_discovery $(TEST_DIR)/test_connection
 
-# Python and pybind11 configuration
-PYTHON          ?= python3
-PYTHON_CONFIG    = $(PYTHON)-config
-PYEXT           := $(shell $(PYTHON_CONFIG) --extension-suffix)
-PYBIND11_INCLUDES := $(shell $(PYTHON) -m pybind11 --includes)
-PYTHON_LDFLAGS := $(shell $(PYTHON_CONFIG) --ldflags)
+# Core TCPX tests
+test_device_discovery: $(TEST_DIR)/test_device_discovery.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o $(TEST_DIR)/test_device_discovery $(TEST_DIR)/test_device_discovery.cc tcpx_impl.cc $(LIBS)
 
-LDFLAGS = -L$(CUDA_LIB) -lcudart -lcuda \
-          -Wl,-rpath,$(CUDA_LIB) -lglog -lgflags -lgtest \
-          -lz -lelf -libverbs -lpthread -ldl -lpthread
+test_connection: $(TEST_DIR)/test_connection.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o $(TEST_DIR)/test_connection $(TEST_DIR)/test_connection.cc tcpx_impl.cc $(LIBS)
 
-# TCPX engine shared library
-ENGINE_SRCS = engine.cc tcpx_transport_minimal.cc pybind_engine.cc
-ENGINE_LIB = libuccl_tcpx_engine.so
+# Additional tests (development/experimental)
+test_tcpx: $(TEST_DIR)/test_tcpx.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o $(TEST_DIR)/test_tcpx $(TEST_DIR)/test_tcpx.cc tcpx_impl.cc $(LIBS)
 
-# Python test entrypoint
-PYTHON_TEST = test_tcpx_write.py
+test_endpoint_tcpx: $(TEST_DIR)/test_endpoint_tcpx.cc tcpx_impl.cc
+	$(CXX) $(CXXFLAGS) -o $(TEST_DIR)/test_endpoint_tcpx $(TEST_DIR)/test_endpoint_tcpx.cc tcpx_impl.cc $(LIBS)
 
-.PHONY: all clean test run-test
+# Convenience targets
+all: test_device_discovery test_connection
 
-all: $(ENGINE_LIB)
-
-# Build the TCPX engine shared library used by the Python test harness
-$(ENGINE_LIB): $(ENGINE_SRCS)
-	$(CXX) $(CXXFLAGS) $(PYBIND11_INCLUDES) -o $@ $^ $(LDFLAGS)
-
-# Run Python smoke test
-test: run-test
-
-run-test: $(ENGINE_LIB)
-	@echo "Running TCPX Python smoke test..."
-	@echo "Ensure environment variables are set:"
-	@echo "  export UCCL_TCPX_PLUGIN_PATH=/path/to/your/tcpx/lib"
-	@echo "  export UCCL_TCPX_DEV=0"
+# Run automated tests
+test: test_device_discovery
+	@echo "=== Running TCPX Tests ==="
+	@echo "1. Device discovery test:"
+	./$(TEST_DIR)/test_device_discovery
 	@echo ""
-	python3 $(PYTHON_TEST)
+	@echo "2. Connection test requires two nodes - run manually:"
+	@echo "   Node 1: ./$(TEST_DIR)/test_connection server"
+	@echo "   Node 2: ./$(TEST_DIR)/test_connection client <node1_ip>"
 
-# Clean artifacts
-clean:
-	rm -f $(ENGINE_LIB)
-
-# Help
+# Help information
 help:
-	@echo "TCPX Engine build options:"
-	@echo "  all       - build TCPX engine shared library"
-	@echo "  test      - run the Python smoke test"
-	@echo "  run-test  - run the Python smoke test"
-	@echo "  clean     - remove build artifacts"
-	@echo "  help      - show this help"
+	@echo "TCPX P2P Transport Build Targets:"
 	@echo ""
-	@echo "Environment variables:"
-	@echo "  UCCL_TCPX_PLUGIN_PATH - path to NCCL TCPX plugin"
-	@echo "  UCCL_TCPX_DEV         - TCPX device index"
+	@echo "Core Tests:"
+	@echo "  test_device_discovery - Test TCPX device discovery"
+	@echo "  test_connection      - Test connection between two nodes"
+	@echo ""
+	@echo "Development Tests:"
+	@echo "  test_tcpx           - Basic TCPX plugin loading test"
+	@echo "  test_endpoint_tcpx  - Endpoint integration demo"
+	@echo ""
+	@echo "Utility:"
+	@echo "  all                 - Build core tests"
+	@echo "  test                - Run automated tests"
+	@echo "  clean               - Remove all built files"
+	@echo "  help                - Show this help"
+
+clean:
+	rm -f $(TEST_DIR)/test_* *.o
+
+.PHONY: all test help clean

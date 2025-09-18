@@ -5,14 +5,14 @@
 #include <iostream>
 #include <unistd.h>
 
-// NCCL网络句柄 - 用于连接信息交换
-// 根据NCCL标准，句柄大小通常是128字节（增加缓冲区以避免溢出）
+// NCCL network handle - used to exchange connection details
+// According to the NCCL spec, the handle is typically 128 bytes (extra space avoids overflow)
 #define NCCL_NET_HANDLE_MAXSIZE 128
 struct ncclNetHandle_v7 {
   char data[NCCL_NET_HANDLE_MAXSIZE];
 };
 
-// 句柄文件路径 - 用于节点间交换连接信息
+// Handle file path - used to share connection info between nodes
 char const* HANDLE_FILE = "/tmp/tcpx_handle.dat";
 
 int main(int argc, char* argv[]) {
@@ -152,8 +152,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Send comm: " << send_comm << std::endl;
     std::cout << "Send dev handle: " << send_dev_handle << std::endl;
 
-    // Cleanup - 使用通用的tcpx_close函数
-    // tcpx_close_send(send_comm);  // 这些函数可能不存在
+    // Cleanup - use the generic tcpx_close helpers
+    // tcpx_close_send(send_comm);  // These functions may not exist
     std::cout << "TODO: Implement proper cleanup for TCPX connections"
               << std::endl;
 

@@ -1,43 +1,41 @@
-# TCPX P2P 集成状态报告
+# TCPX P2P Integration Status
 
-## 🎉 已完成的重大里程碑
+## 🎉 Completed Milestones
 
-### ✅ 1. TCPX连接测试成功
-- **问题解决**: 修复了C++符号名问题和栈溢出问题
-- **功能验证**: 两个节点间成功建立TCPX连接
-- **API调用**: `tcpx_listen()`, `tcpx_connect_v5()`, `tcpx_accept_v5()` 全部工作正常
-- **句柄交换**: 实现了正确的连接句柄交换机制
+### ✅ TCPX Connection Success
+- **Core Issues Resolved**: Fixed C++ symbol names and stack overflow
+- **Functionality Verified**: Two-node TCPX connection establishment working
+- **API Integration**: `tcpx_listen()`, `tcpx_connect_v5()`, `tcpx_accept_v5()` all functional
+- **Handle Exchange**: Proper connection handle sharing mechanism implemented
 
-### ✅ 2. 完整的测试框架
-- `test_device_discovery` - TCPX设备发现 ✅
-- `test_connection` - 带句柄交换的连接测试 ✅  
-- `test_connection_v2` - 独立的V2版本 ✅
-- `test_endpoint_tcpx` - Endpoint集成演示 ✅
+### ✅ Testing Framework
+- `test_device_discovery` - TCPX device discovery ✅
+- `test_connection` - End-to-end connection test ✅
 
-### ✅ 3. 代码清理和重构
-- 注释掉所有RDMA相关代码，保留作为参考
-- 为每个函数添加详细的TODO标记
-- 保持原有接口不变，便于后续集成
+### ✅ Code Organization
+- RDMA code commented out but preserved for reference
+- Detailed TODO markers for TCPX implementation
+- Interface compatibility maintained
 
-## 🔧 当前可用功能
+## 🔧 Current Capabilities
 
-### 立即可用的测试
+### Ready-to-Use Tests
 ```bash
-# 编译所有测试
-make -f Makefile.simple clean
-make -f Makefile.simple test_connection
+# Build and run tests
+make all
+make test
 
-# 运行连接测试（两个节点）
-# 节点1: ./test_connection server
-# 节点2: ./test_connection client 10.0.0.107
+# Two-node connection test
+# Node 1: ./tests/test_connection server
+# Node 2: ./tests/test_connection client <node1_ip>
 ```
 
-### 验证过的TCPX功能
-1. **设备发现**: 发现4个TCPX设备 (eth1-eth4)
-2. **插件加载**: TCPX插件v3.1.6正常工作
-3. **连接建立**: 服务器监听 + 客户端连接成功
-4. **句柄交换**: 通过文件系统交换连接句柄
-5. **API调用**: 所有核心TCPX API正常工作
+### Verified TCPX Features
+1. **Device Discovery**: 4 TCPX devices detected (eth1-eth4)
+2. **Plugin Loading**: TCPX plugin v3.1.6 working
+3. **Connection Establishment**: Server listen + client connect successful
+4. **Handle Exchange**: File-based connection handle sharing
+5. **API Integration**: Core TCPX APIs functional
 
 ## 🚧 部分完成的功能
 

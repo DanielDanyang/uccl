@@ -1,6 +1,6 @@
-// TCPX Engine C API - 基于RDMA版本的uccl_engine.h
-// 这个文件是从 p2p/uccl_engine.h 复制并修改的TCPX版本
-// 策略：保持RDMA接口，将RDMA实现替换为TCPX实现
+// TCPX Engine C API - derived from the RDMA version of uccl_engine.h
+// This file was copied from p2p/uccl_engine.h and adapted for TCPX
+// Strategy: keep the RDMA interface while replacing the implementation with TCPX
 
 #pragma once
 
