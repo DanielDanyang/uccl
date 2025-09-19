@@ -6,6 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 
+// NCCL memory type constants
+#define NCCL_PTR_HOST 0x1
+#define NCCL_PTR_CUDA 0x2
+
 extern "C" {
 // Basic functions
 int tcpx_get_device_count();

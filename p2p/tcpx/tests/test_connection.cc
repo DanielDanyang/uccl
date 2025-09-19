@@ -1,4 +1,3 @@
-#include "../tcpx_handle_utils.h"
 #include "../tcpx_interface.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -149,22 +148,19 @@ int main(int argc, char* argv[]) {
     std::cout << "✓ SUCCESS: Listening on device " << dev_id << std::endl;
     std::cout << "Listen comm: " << listen_comm << std::endl;
 
-    // Extract connection info from TCPX handle (similar to RDMA)
-    std::cout << "\n[Step 3] Extracting TCPX connection info..." << std::endl;
+    // Keep TCPX handle opaque - don't parse or modify it
+    std::cout << "\n[Step 3] TCPX handle ready for transmission..."
+              << std::endl;
 
-    // Print handle data for debugging
-    std::cout << "TCPX handle data (first 64 bytes):" << std::endl;
-    for (int i = 0; i < 64; i++) {
+    // Print handle data for debugging only
+    std::cout << "TCPX handle data (first 32 bytes):" << std::endl;
+    for (int i = 0; i < 32; i++) {
       printf("%02x ", (unsigned char)handle.data[i]);
       if ((i + 1) % 16 == 0) printf("\n");
     }
     printf("\n");
 
-    // Use smart extraction from handle data
-    tcpxHandle tcpx_handle = extract_tcpx_connection_info(handle.data, dev_id);
-
-    // Copy our extracted handle into NCCL handle for transmission
-    memcpy(handle.data, &tcpx_handle, sizeof(tcpx_handle));
+    // Don't modify the handle - pass it as-is to the client
 
     // Create bootstrap server to send handle to client
     std::cout << "Creating bootstrap server for handle exchange..."
@@ -213,8 +209,8 @@ int main(int argc, char* argv[]) {
 
     // Register memory for TCPX
     void* recv_mhandle = nullptr;
-    int rc_reg =
-        tcpx_reg_mr(recv_comm, recv_buffer, buffer_size, 0, &recv_mhandle);
+    int rc_reg = tcpx_reg_mr(recv_comm, recv_buffer, buffer_size, NCCL_PTR_HOST,
+                             &recv_mhandle);
     if (rc_reg != 0) {
       std::cout << "✗ WARNING: tcpx_reg_mr failed with rc=" << rc_reg
                 << std::endl;
@@ -307,17 +303,22 @@ int main(int argc, char* argv[]) {
 
     close(bootstrap_fd);
 
-    // Extract TCPX handle info
-    tcpxHandle tcpx_handle;
-    memcpy(&tcpx_handle, handle.data, sizeof(tcpx_handle));
-    std::cout << "Server info - IP: " << ip_to_str(tcpx_handle.ip_addr_u32)
-              << ", Port: " << tcpx_handle.listen_port
-              << ", Dev: " << tcpx_handle.remote_dev << std::endl;
+    // Use TCPX handle as-is (opaque data)
+    std::cout << "Using TCPX handle for connection (opaque data)..."
+              << std::endl;
+
+    // Print handle for debugging
+    std::cout << "Received handle (first 32 bytes):" << std::endl;
+    for (int i = 0; i < 32; i++) {
+      printf("%02x ", (unsigned char)handle.data[i]);
+      if ((i + 1) % 16 == 0) printf("\n");
+    }
+    printf("\n");
 
     void* send_comm = nullptr;
     void* send_dev_handle = nullptr;
 
-    std::cout << "Attempting to connect to " << argv[2] << "..." << std::endl;
+    std::cout << "Attempting TCPX connection..." << std::endl;
     int rc = tcpx_connect_v5(dev_id, &handle, &send_comm, &send_dev_handle);
     if (rc != 0) {
       std::cout << "✗ FAILED: tcpx_connect_v5 returned " << rc << std::endl;
@@ -343,8 +344,8 @@ int main(int argc, char* argv[]) {
 
     // Register memory for TCPX
     void* send_mhandle = nullptr;
-    int rc_reg =
-        tcpx_reg_mr(send_comm, send_buffer, message_len, 0, &send_mhandle);
+    int rc_reg = tcpx_reg_mr(send_comm, send_buffer, message_len, NCCL_PTR_HOST,
+                             &send_mhandle);
     if (rc_reg != 0) {
       std::cout << "✗ WARNING: tcpx_reg_mr failed with rc=" << rc_reg
                 << std::endl;
