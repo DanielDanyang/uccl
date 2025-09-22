@@ -128,22 +128,12 @@ int tcpx_get_device_count() {
 int tcpx_listen(int dev, void* handle, void** listen_comm) {
   tcpx_dbg("tcpx_listen: dev=%d (using v5 API for consistency)", dev);
 
-  if (!g_plugin_handle) {
-    tcpx_dbg("tcpx_listen: plugin not loaded");
+  if (!g_net || !g_net->listen) {
+    tcpx_dbg("tcpx_listen: plugin not initialized or listen not available");
     return -1;
   }
 
-  // Use tcpxListenV3 function (closest to v5 API)
-  typedef int (*tcpxListenV3_fn)(void*, int, void*, void**);
-  tcpxListenV3_fn listen_fn =
-      (tcpxListenV3_fn)dlsym(g_plugin_handle, "_Z12tcpxListenV3PviS_PS_");
-
-  if (!listen_fn) {
-    tcpx_dbg("tcpxListenV3 function not found: %s", dlerror());
-    return -1;
-  }
-
-  int rc = listen_fn(handle, dev, handle, listen_comm);
+  int rc = g_net->listen(dev, handle, listen_comm);
   tcpx_dbg("tcpx_listen (v5): rc=%d listen_comm=%p", rc, *listen_comm);
   return rc;
 }
@@ -155,22 +145,13 @@ int tcpx_connect_v5(int dev, void* handle, void** send_comm,
                     void** send_dev_handle) {
   tcpx_dbg("tcpx_connect_v5: dev=%d handle=%p (using v5 API)", dev, handle);
 
-  if (!g_plugin_handle) {
-    tcpx_dbg("tcpx_connect_v5: plugin not loaded");
+  if (!g_net || !g_net->connect) {
+    tcpx_dbg(
+        "tcpx_connect_v5: plugin not initialized or connect not available");
     return -1;
   }
 
-  // Use the v5 function that we know exists
-  typedef int (*tcpxConnect_v5_fn)(int, void*, void**, void**);
-  tcpxConnect_v5_fn connect_fn = (tcpxConnect_v5_fn)dlsym(
-      g_plugin_handle, "_Z14tcpxConnect_v5iPvPS_PP24ncclNetDeviceHandle_v7_t");
-
-  if (!connect_fn) {
-    tcpx_dbg("tcpxConnect_v5 function not found: %s", dlerror());
-    return -1;
-  }
-
-  int rc = connect_fn(dev, handle, send_comm, send_dev_handle);
+  int rc = g_net->connect(dev, handle, send_comm, send_dev_handle);
   tcpx_dbg("tcpx_connect_v5: rc=%d send_comm=%p send_dev_handle=%p", rc,
            *send_comm, *send_dev_handle);
   return rc;
@@ -180,22 +161,12 @@ int tcpx_accept_v5(void* listen_comm, void** recv_comm,
                    void** recv_dev_handle) {
   tcpx_dbg("tcpx_accept_v5: listen_comm=%p (using v5 API)", listen_comm);
 
-  if (!g_plugin_handle) {
-    tcpx_dbg("tcpx_accept_v5: plugin not loaded");
+  if (!g_net || !g_net->accept) {
+    tcpx_dbg("tcpx_accept_v5: plugin not initialized or accept not available");
     return -1;
   }
 
-  // Use the v5 function that we know exists
-  typedef int (*tcpxAccept_v5_fn)(void*, void**, void**);
-  tcpxAccept_v5_fn accept_fn = (tcpxAccept_v5_fn)dlsym(
-      g_plugin_handle, "_Z13tcpxAccept_v5PvPS_PP24ncclNetDeviceHandle_v7_t");
-
-  if (!accept_fn) {
-    tcpx_dbg("tcpxAccept_v5 function not found: %s", dlerror());
-    return -1;
-  }
-
-  int rc = accept_fn(listen_comm, recv_comm, recv_dev_handle);
+  int rc = g_net->accept(listen_comm, recv_comm, recv_dev_handle);
   tcpx_dbg("tcpx_accept_v5: rc=%d recv_comm=%p recv_dev_handle=%p", rc,
            *recv_comm, *recv_dev_handle);
   return rc;
