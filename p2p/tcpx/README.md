@@ -12,7 +12,7 @@ p2p/tcpx/
 │   ├── test_device_discovery.cc  # 设备发现测试
 │   ├── test_connection.cc         # 连接测试
 │   ├── test_tcpx.cc              # 基础功能测试
-│   └── test_perf.cc              # 性能测试框架
+│   └── test_performance.cc       # 真实性能测试
 ├── Makefile                  # 构建系统
 ├── CONVERSATION_MEMORY.md    # 项目记录
 └── README.md                 # 本文件
@@ -40,8 +40,11 @@ export UCCL_TCPX_DEBUG=1
 # 设备发现测试
 ./tests/test_device_discovery
 
-# 性能测试框架 (单节点)
-./tests/test_perf
+# 真实性能测试 (需要两个节点)
+# 服务器端:
+./tests/test_performance server
+# 客户端:
+./tests/test_performance client <server_ip>
 
 # 连接测试 (需要两个节点)
 # 服务器端:

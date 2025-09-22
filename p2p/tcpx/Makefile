@@ -13,11 +13,11 @@ test_connection:
 test_tcpx:
 	$(CXX) $(CXXFLAGS) -o tests/test_tcpx tests/test_tcpx.cc tcpx_impl.cc $(LIBS)
 
-test_perf:
-	$(CXX) $(CXXFLAGS) -o tests/test_perf tests/test_perf.cc tcpx_impl.cc $(LIBS)
+test_performance:
+	$(CXX) $(CXXFLAGS) -o tests/test_performance tests/test_performance.cc tcpx_impl.cc $(LIBS)
 
 # Build all core tests
-all: test_device_discovery test_connection test_perf
+all: test_device_discovery test_connection test_performance
 
 # Run device discovery test
 test: test_device_discovery
@@ -25,6 +25,6 @@ test: test_device_discovery
 
 # Clean built files (only executables, not source code)
 clean:
-	rm -f tests/test_device_discovery tests/test_connection tests/test_tcpx tests/test_perf *.o
+	rm -f tests/test_device_discovery tests/test_connection tests/test_tcpx tests/test_performance *.o
 
 .PHONY: all test clean
