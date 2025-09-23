@@ -47,10 +47,10 @@ export UCCL_TCPX_DEBUG=1
 ./tests/test_performance client <server_ip>
 
 # 连接测试 (需要两个节点)
-# 服务器端:
+# 服务器端 (gke-character-k8s-gcp5-h100-3: 10.0.1.46):
 ./tests/test_connection server
-# 客户端:
-./tests/test_connection client <server_ip>
+# 客户端 (gcp5-h100-2: 10.0.1.170):
+./tests/test_connection client 10.0.0.250
 ```
 
 ## 🎯 开发计划
@@ -69,3 +69,94 @@ export UCCL_TCPX_DEBUG=1
 - `mooncake/` - NIXL 后端插件参考实现
 - `p2p/uccl_engine.h` - 引擎接口参考
 - `nccl-plugin-gpudirecttcpx/src/net_tcpx.h` - TCPX API 定义
+
+## 环境变量建议（两端都需要设置）
+
+```bash
+# 控制面网卡（TCPX 控制连接）
+export NCCL_SOCKET_IFNAME=eth0
+
+# 数据面网卡列表（逗号分隔，按实际环境调整）
+export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME="eth1,eth2,eth3,eth4"
+
+# 如未启用/部署 gpumemd，或仅需先验证 TCP 传输路径，关闭 CUDA IPC 接收内存导入：
+export NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=0
+
+# 如需缩短流表等待时间（可选）
+export NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS=50000
+```
+
+            ┌─────────────────────┐
+            │       Server        │
+            └─────────┬───────────┘
+                      │
+        Step 1: 初始化 TCPX (tcpx_get_device_count)
+                      │
+        Step 2: 监听设备 (tcpx_listen)
+            生成 NCCL handle (128B)
+                      │
+        Step 3: 建立 bootstrap TCP socket
+                      │
+        发送 handle 给 client (send)
+                      │
+        Step 4: 等待连接
+    ┌─────────────────┴─────────────────┐
+    │                                   │
+tcpx_accept_v5                  connect_to_bootstrap_server
+ 分配 recv_dev_handle buffer            │
+ 得到 recv_comm                        │
+    │                                   │
+    ▼                                   ▼
+注册接收缓冲区 (tcpx_reg_mr)     Step 3: 接收 handle
+发起接收请求 (tcpx_irecv)          用 handle 调用 tcpx_connect_v5
+轮询完成 (tcpx_test)               得到 send_comm
+    │                                   │
+    ▼                                   │
+ Step 4: 等待接收数据                 Step 4: 准备发送数据
+ 如果完成：打印 "Hello..."             注册发送缓冲区 (tcpx_reg_mr)
+ 否则超时                              调用 tcpx_isend
+                                       轮询完成 (tcpx_test)
+    │                                   │
+    └─────────────────┬─────────────────┘
+                      │
+           === 测试完成 (COMPLETED) ===
+
+                 ┌─────────────────────┐
+                 │        Server       │
+                 └──────────┬──────────┘
+                            │
+        Step 1: 初始化 TCPX (tcpx_get_device_count) ✅
+                            │
+        Step 2: 监听设备 (tcpx_listen) ✅
+            生成 NCCL handle (128B)
+                            │
+        Step 3: 建立 bootstrap TCP socket ✅
+                            │
+        发送 handle 给 client (send) ✅
+                            │
+        Step 4: 等待连接 ✅
+        ┌──────────────────┴──────────────────┐
+        │                                     │
+ tcpx_accept_v5 ✅                     connect_to_bootstrap_server ✅
+ 分配 recv_dev_handle buffer           Step 3: 接收 handle ✅
+ 得到 recv_comm ✅                      用 handle 调用 tcpx_connect_v5 ✅
+        │                                得到 send_comm ✅
+        ▼
+ 注册接收缓冲区 (tcpx_reg_mr) ✅        Step 4: 准备发送数据
+ 发起接收请求 (tcpx_irecv) ✅           注册发送缓冲区 (tcpx_reg_mr) ✅
+        │                                调用 tcpx_isend ✅
+        ▼                                轮询完成 (tcpx_test) ❌
+ 轮询完成 (tcpx_test) ❌
+   │   recvfrom(fd=53, buf, 24) = EFAULT
+   │   → 插件 host-mem data-socket 路径出错
+   │
+   ▼
+ Step 4: 等待接收数据 ❌
+ 打印 "Hello..." ← 未成功
+ （TIMEOUT: no data）
+
+        │
+        └──────────────────┬──────────────────┘
+                           │
+              === 测试未完成 (卡在数据传输阶段) ===
+
