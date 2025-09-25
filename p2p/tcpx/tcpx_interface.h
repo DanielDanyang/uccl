@@ -32,6 +32,9 @@ int tcpx_irecv(void* recv_comm, int n, void** data, int* sizes, int* tags,
                void** mhandles, void** request);
 int tcpx_test(void* request, int* done, int* size);
 
+// Completion helpers
+int tcpx_irecv_consumed(void* comm, int n, void* request);
+
 // Connection cleanup
 int tcpx_close_send(void* send_comm);
 int tcpx_close_recv(void* recv_comm);

@@ -10,8 +10,8 @@ p2p/tcpx/
 ├── tcpx_impl.cc              # TCPX 插件集成实现 (经过测试)
 ├── tests/
 │   ├── test_device_discovery.cc  # 设备发现测试
-│   ├── test_connection.cc         # 连接测试
-│   ├── test_tcpx_transfer.cc      # GPU DMA-BUF 传输验证
+│   ├── test_connection.cc         # 连接测试 (主机内存)
+│   ├── test_tcpx_transfer.cc      # ⭐ GPU-to-GPU传输测试 (核心功能)
 │   ├── test_tcpx.cc              # 基础功能测试
 │   └── test_performance.cc       # 真实性能测试
 ├── Makefile                  # 构建系统
@@ -29,6 +29,7 @@ make all
 # 或编译单个测试
 make test_device_discovery
 make test_connection
+make test_tcpx_transfer  # GPU传输测试 (推荐)
 make test_tcpx_transfer
 make test_tcpx
 ```
@@ -52,19 +53,63 @@ export UCCL_TCPX_DEBUG=1
 ./tests/test_connection server
 ./tests/test_connection client <server_ip>
 
-# GPU DMA 传输测试 (需要 gpumemd)
+# ⭐ GPU-to-GPU传输测试 (核心功能测试)
+# 这是最重要的测试，验证TCPX的GPU直接内存传输能力
 ./tests/test_tcpx_transfer server
 ./tests/test_tcpx_transfer client <server_ip>
+
+# 使用脚本运行 (推荐)
+./run_tcpx_test.sh transfer server      # 服务器端
+./run_tcpx_test.sh transfer <server_ip> # 客户端
 ```
+
+## 🎯 **test_tcpx_transfer.cc 详细说明**
+
+### 📋 **测试目标**
+`test_tcpx_transfer.cc` 是验证TCPX GPU-to-GPU直接传输的核心测试，专门测试：
+- GPU设备内存的分配和4KB对齐
+- CUDA内存注册到TCPX (NCCL_PTR_CUDA)
+- GPU-to-GPU的直接数据传输
+- 数据完整性验证
+
+### 🔧 **测试流程**
+1. **服务器端**：
+   - 初始化TCPX设备
+   - 创建监听连接并生成句柄
+   - 通过bootstrap TCP连接发送句柄给客户端
+   - 接受TCPX连接
+   - 分配4KB对齐的GPU内存
+   - 注册GPU内存到TCPX
+   - 等待接收数据并验证内容
+
+2. **客户端**：
+   - 初始化TCPX设备
+   - 通过bootstrap TCP连接获取服务器句柄
+   - 建立TCPX连接
+   - 分配4KB对齐的GPU内存
+   - 将测试消息复制到GPU内存
+   - 注册GPU内存到TCPX
+   - 发送数据到服务器
+
+### ✅ **成功标志**
+- 服务器接收到完整数据
+- 数据内容与发送的测试消息完全匹配
+- 无CUDA错误或TCPX传输错误
+
+### 🚨 **常见问题**
+- **内存对齐**：GPU内存必须4KB对齐
+- **gpumemd依赖**：需要gpumemd服务支持GPU DMA-BUF
+- **环境变量**：需要正确设置TCPX相关环境变量
 
 ## 🎯 开发计划
 
 ### 当前状态 ✅
 - TCPX API 层已完成并测试
 - 基础连接功能已验证
+- GPU-to-GPU传输测试已实现
 
 ### 下一步 🔄
-1. **性能测试** - 验证 TCPX send/recv 性能
+1. **验证transfer测试** - 确保GPU传输功能正常
 2. **NIXL 插件** - 创建类似 mooncake 的后端插件
 3. **集成测试** - 让 benchmark_nixl.py 使用 tcpx 后端
 
@@ -73,6 +118,7 @@ export UCCL_TCPX_DEBUG=1
 - `mooncake/` - NIXL 后端插件参考实现
 - `p2p/uccl_engine.h` - 引擎接口参考
 - `nccl-plugin-gpudirecttcpx/src/net_tcpx.h` - TCPX API 定义
+- `docs/tcpx_transfer.md` - GPU 传输测试流程与注意事项
 
 ## 官方推荐路径（GPUDirect TCPX）
 
