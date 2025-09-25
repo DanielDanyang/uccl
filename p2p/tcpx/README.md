@@ -11,6 +11,7 @@ p2p/tcpx/
 ├── tests/
 │   ├── test_device_discovery.cc  # 设备发现测试
 │   ├── test_connection.cc         # 连接测试
+│   ├── test_tcpx_transfer.cc      # GPU DMA-BUF 传输验证
 │   ├── test_tcpx.cc              # 基础功能测试
 │   └── test_performance.cc       # 真实性能测试
 ├── Makefile                  # 构建系统
@@ -28,6 +29,7 @@ make all
 # 或编译单个测试
 make test_device_discovery
 make test_connection
+make test_tcpx_transfer
 make test_tcpx
 ```
 
@@ -46,11 +48,13 @@ export UCCL_TCPX_DEBUG=1
 # 客户端:
 ./tests/test_performance client <server_ip>
 
-# 连接测试 (需要两个节点)
-# 服务器端 (gke-character-k8s-gcp5-h100-3: 10.0.1.46):
+# 连接测试 (仅握手)
 ./tests/test_connection server
-# 客户端 (gcp5-h100-2: 10.0.1.170):
-./tests/test_connection client 10.0.0.250
+./tests/test_connection client <server_ip>
+
+# GPU DMA 传输测试 (需要 gpumemd)
+./tests/test_tcpx_transfer server
+./tests/test_tcpx_transfer client <server_ip>
 ```
 
 ## 🎯 开发计划
@@ -70,93 +74,79 @@ export UCCL_TCPX_DEBUG=1
 - `p2p/uccl_engine.h` - 引擎接口参考
 - `nccl-plugin-gpudirecttcpx/src/net_tcpx.h` - TCPX API 定义
 
-## 环境变量建议（两端都需要设置）
+## 官方推荐路径（GPUDirect TCPX）
+
+Google 发布的 TCPX 插件默认走 GPU DMA-BUF / `gpumemd` 服务链路：
+
+- `kUseDmaBuf` 默认开启，意味着插件期望直接对 GPU 内存做 DMA 映射，而不是落回 host bounce buffer【nccl-plugin-gpudirecttcpx/src/flags.cc:32】。
+- 当调用 `tcpx_reg_mr(..., NCCL_PTR_CUDA, ...)` 时，代码会强制要求 4 KB 对齐并通过 `gpu_tx_reg_mr()` 向 `gpumemd` 请求 DMA-BUF FD，若未能拿到则直接返回 `tcpxInternalError`【nccl-plugin-gpudirecttcpx/src/net_tcpx.cc:792-809】【nccl-plugin-gpudirecttcpx/src/gpu/cuda_wrapper.cu:226-246】。
+- 接收端同样通过 `gpumem_import()` / `GpumemImport()` 走 UNIX 域 socket 与 gpumemd 协议，期望在 `/tmp/nvdma-<GPU PCI>` 和 `<prefix>/get_gpu_fd_*` 提供共享句柄【nccl-plugin-gpudirecttcpx/src/gpu/rx_pool.cu:31-124】。
+
+因此，官方推荐路径要保证：
+
+1. **gpumemd 服务运行在两台节点上**（通常由 Google 提供的 systemd 单元或容器部署），负责在每块 GPU 暴露 `/tmp/nvdma-<pci>` 文件及 `unix://<prefix>/get_gpu_fd_*` 控制通道。
+2. **应用使用 CUDA 设备内存** 作为收发缓冲区，确保指针按 4KB 对齐（可以通过 `cudaMalloc`/`cudaMallocAsync` 或在注册前手动对齐）。
+3. **先建立 CUDA 上下文**（`cudaSetDevice` 或 `cudaFree(0)`）再初始化 TCPX，使 `gpu_current_dev` / `cuCtxSetCurrent` 调用能够成功。
+4. **保持 DMA-BUF 相关环境变量为默认值**，不要人为关闭 GPU 内存导入；只有在调试 fallback 时才改。
+
+## 环境变量（官方配置，双方一致）
 
 ```bash
-# 控制面网卡（TCPX 控制连接）
+# 控制面网卡（Bootstrap / 控制通道）
 export NCCL_SOCKET_IFNAME=eth0
 
-# 数据面网卡列表（逗号分隔，按实际环境调整）
+# 数据面 NIC 列表（按实际拓扑排列，需与 gpumemd/network 绑核设置一致）
 export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME="eth1,eth2,eth3,eth4"
 
-# 如未启用/部署 gpumemd，或仅需先验证 TCP 传输路径，关闭 CUDA IPC 接收内存导入：
-export NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=0
+# 启用 gpumemd + GPUDirect RX (默认值为 1，显式写出避免被其他脚本覆盖)
+export NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=1
+export NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX="/run/tcpx"
 
-# 如需缩短流表等待时间（可选）
+# DMA-BUF、流表等保持官方默认
 export NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS=50000
+export NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE=1
+export NCCL_GPUDIRECTTCPX_FORCE_ACK=0
+export NCCL_NET_GDR_LEVEL=PIX
+export NCCL_P2P_PXN_LEVEL=0
+
+# 调试项（可选）
+export UCCL_TCPX_DEBUG=1
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=NET
 ```
 
-            ┌─────────────────────┐
-            │       Server        │
-            └─────────┬───────────┘
-                      │
-        Step 1: 初始化 TCPX (tcpx_get_device_count)
-                      │
-        Step 2: 监听设备 (tcpx_listen)
-            生成 NCCL handle (128B)
-                      │
-        Step 3: 建立 bootstrap TCP socket
-                      │
-        发送 handle 给 client (send)
-                      │
-        Step 4: 等待连接
-    ┌─────────────────┴─────────────────┐
-    │                                   │
-tcpx_accept_v5                  connect_to_bootstrap_server
- 分配 recv_dev_handle buffer            │
- 得到 recv_comm                        │
-    │                                   │
-    ▼                                   ▼
-注册接收缓冲区 (tcpx_reg_mr)     Step 3: 接收 handle
-发起接收请求 (tcpx_irecv)          用 handle 调用 tcpx_connect_v5
-轮询完成 (tcpx_test)               得到 send_comm
-    │                                   │
-    ▼                                   │
- Step 4: 等待接收数据                 Step 4: 准备发送数据
- 如果完成：打印 "Hello..."             注册发送缓冲区 (tcpx_reg_mr)
- 否则超时                              调用 tcpx_isend
-                                       轮询完成 (tcpx_test)
-    │                                   │
-    └─────────────────┬─────────────────┘
-                      │
-           === 测试完成 (COMPLETED) ===
+> 说明：如果需要暂时退回 host bounce 模式，再把 `NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT` 设为 0；但那属于降级手段，并不符合官方推荐流程。
 
-                 ┌─────────────────────┐
-                 │        Server       │
-                 └──────────┬──────────┘
-                            │
-        Step 1: 初始化 TCPX (tcpx_get_device_count) ✅
-                            │
-        Step 2: 监听设备 (tcpx_listen) ✅
-            生成 NCCL handle (128B)
-                            │
-        Step 3: 建立 bootstrap TCP socket ✅
-                            │
-        发送 handle 给 client (send) ✅
-                            │
-        Step 4: 等待连接 ✅
-        ┌──────────────────┴──────────────────┐
-        │                                     │
- tcpx_accept_v5 ✅                     connect_to_bootstrap_server ✅
- 分配 recv_dev_handle buffer           Step 3: 接收 handle ✅
- 得到 recv_comm ✅                      用 handle 调用 tcpx_connect_v5 ✅
-        │                                得到 send_comm ✅
-        ▼
- 注册接收缓冲区 (tcpx_reg_mr) ✅        Step 4: 准备发送数据
- 发起接收请求 (tcpx_irecv) ✅           注册发送缓冲区 (tcpx_reg_mr) ✅
-        │                                调用 tcpx_isend ✅
-        ▼                                轮询完成 (tcpx_test) ❌
- 轮询完成 (tcpx_test) ❌
-   │   recvfrom(fd=53, buf, 24) = EFAULT
-   │   → 插件 host-mem data-socket 路径出错
-   │
-   ▼
- Step 4: 等待接收数据 ❌
- 打印 "Hello..." ← 未成功
- （TIMEOUT: no data）
+## 推荐测试流程（GPU DMA-BUF 路径）
 
-        │
-        └──────────────────┬──────────────────┘
-                           │
-              === 测试未完成 (卡在数据传输阶段) ===
+```
+            ┌─────────────────────┐                   ┌─────────────────────┐
+            │       Server        │                   │       Client        │
+            └─────────┬───────────┘                   └─────────┬───────────┘
+                      │                                           │
+          tcpx_get_device_count ✅                    tcpx_get_device_count ✅
+                      │                                           │
+              tcpx_listen ✅                              接收 bootstrap 句柄 ✅
+                      │                                           │
+         发送 128B NCCL 句柄 ✅                        tcpx_connect_v5 ✅
+                      │                                           │
+              tcpx_accept_v5 ✅                           获得 send_comm ✅
+                      │                                           │
+   ┌─────────────── GPU 数据面 ───────────────┐        注册 CUDA 缓冲区 (对齐) ✅
+   │  tcpx_reg_mr(NCCL_PTR_CUDA) ✅         │        tcpx_reg_mr(NCCL_PTR_CUDA) ✅
+   │  gpumem_import / gpumemd handshake ✅   │        gpumemd: get_gpu_fd_* ✅
+   │  tcpx_irecv ✅                          │        tcpx_isend ✅
+   │  tcpx_test → done=1 ✅                  │<───── DMA-BUF 输送数据 ───┘
+   │  解包数据 & 校验 ✅                     │
+   └────────────────────────────────────────┘
+                      │
+          打印 "Hello from TCPX client!" ✅
+```
+
+## 当前阻塞点
+
+1. **gpumemd 服务状态未知**：需要在两台 H100 节点确认 `systemctl status gpumemd`（或云端提供的等效命令），确保上述 UNIX socket、`/run/tcpx/get_gpu_fd_*` 可用。
+2. **TCPX 测试仍在 host fallback**：尽管 CUDA runtime 已确认可用（NCCL-test 已跑通），日志显示 `tcpx_reg_mr` 仍然落在 host path，表明 DMA-BUF 注册被拒绝。建议在 `test_connection.cc` 调试输出 `rc_reg` 的详细错误码，并在 `tcpx_reg_mr` 失败时打印 `errno`/`ret`。
+3. **需要恢复默认环境**：本地 README 之前为了调试 EFAULT 手动设置了 `NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=0` 与 `UCCL_TCPX_FORCE_HOST_RECV=1`，这些变量会绕过官方路径，现已移除，云端环境也需要同步更新。
+4. **CUDA 上下文初始化**：确保 server/client 在 TCPX 初始化前调用 `cudaSetDevice(dev_id);`（或 `cudaFree(0);`），避免 `gpu_current_dev`/`cuCtxSetCurrent` 返回错误，导致 gpumemd 交互失败。
 

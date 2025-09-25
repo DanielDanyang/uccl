@@ -12,6 +12,9 @@ test_device_discovery:
 test_connection:
 	$(CXX) $(CXXFLAGS) -o tests/test_connection tests/test_connection.cc tcpx_impl.cc $(LIBS) $(CUDA_LIBS)
 
+test_tcpx_transfer:
+	$(CXX) $(CXXFLAGS) -o tests/test_tcpx_transfer tests/test_tcpx_transfer.cc tcpx_impl.cc $(LIBS) $(CUDA_LIBS)
+
 test_tcpx:
 	$(CXX) $(CXXFLAGS) -o tests/test_tcpx tests/test_tcpx.cc tcpx_impl.cc $(LIBS)
 
@@ -19,7 +22,7 @@ test_performance:
 	$(CXX) $(CXXFLAGS) -o tests/test_performance tests/test_performance.cc tcpx_impl.cc $(LIBS)
 
 # Build all core tests
-all: test_device_discovery test_connection test_performance
+all: test_device_discovery test_connection test_tcpx_transfer test_performance
 
 # Build tests without CUDA dependency
 no-cuda: test_device_discovery test_tcpx test_performance

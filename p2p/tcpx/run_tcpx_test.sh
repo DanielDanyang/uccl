@@ -41,11 +41,7 @@ export NCCL_GPUDIRECTTCPX_CTRL_DEV=eth0
 export NCCL_GPUDIRECTTCPX_TX_BINDINGS="eth1:8-21,112-125;eth2:8-21,112-125;eth3:60-73,164-177;eth4:60-73,164-177"
 export NCCL_GPUDIRECTTCPX_RX_BINDINGS="eth1:22-35,126-139;eth2:22-35,126-139;eth3:74-87,178-191;eth4:74-87,178-191"
 export NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS=50000
-export NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=0
-# Avoid MSG_ZEROCOPY for tiny messages to reduce flakiness
-export NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE=65536
-# Force host receive path in test_connection to bypass GPU import
-export UCCL_TCPX_FORCE_HOST_RECV=1
+export NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=1
 export NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX="/run/tcpx"
 export NCCL_GPUDIRECTTCPX_FORCE_ACK=0
 export NCCL_NET_GDR_LEVEL=PIX
@@ -111,6 +107,34 @@ case $TEST_TYPE in
         fi
         ;;
     
+    "transfer")
+        if [ -z "$SERVER_IP" ]; then
+            echo "❌ 传输测试需要指定服务器IP"
+            echo "用法: $0 transfer <server_ip>"
+            echo "或者在两个节点分别运行:"
+            echo "  节点1 ($NODE1_IP): $0 transfer server"
+            echo "  节点2 ($NODE2_IP): $0 transfer $NODE1_IP"
+            exit 1
+        fi
+
+        echo "编译 GPU 传输测试..."
+        if ! make test_tcpx_transfer; then
+            echo "❌ 编译失败"
+            exit 1
+        fi
+        echo "✅ 编译完成"
+        echo ""
+
+        if [ "$SERVER_IP" = "server" ]; then
+            echo "=== 运行 GPU 传输测试 (服务器模式) ==="
+            ./tests/test_tcpx_transfer server
+        else
+            echo "=== 运行 GPU 传输测试 (客户端模式) ==="
+            echo "连接到服务器: $SERVER_IP"
+            ./tests/test_tcpx_transfer client $SERVER_IP
+        fi
+        ;;
+
     "performance")
         if [ -z "$SERVER_IP" ]; then
             echo "❌ 性能测试需要指定服务器IP"
