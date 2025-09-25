@@ -245,9 +245,33 @@ int main(int argc, char** argv) {
     std::cout << "[DEBUG] Registered GPU buffer at 0x" << std::hex << d_aligned
               << std::dec << std::endl;
 
+    // Allow host receive debug path via env to isolate GPUDirect issues
+    const char* host_recv_dbg = std::getenv("UCCL_TCPX_HOST_RECV_DEBUG");
     void* recv_mhandle = nullptr;
-    if (tcpx_reg_mr(recv_comm, reinterpret_cast<void*>(d_aligned),
-                    kRegisteredBytes, NCCL_PTR_CUDA, &recv_mhandle) != 0) {
+    void* recv_buf = nullptr;
+    int recv_ptr_type = NCCL_PTR_CUDA;
+    if (host_recv_dbg && host_recv_dbg[0] == '1') {
+      // Allocate page-aligned host buffer
+      size_t page = 4096;
+      void* host_aligned = nullptr;
+      if (posix_memalign(&host_aligned, page, kRegisteredBytes) != 0 || !host_aligned) {
+        std::cout << "[DEBUG] ERROR: posix_memalign failed for host recv" << std::endl;
+        cuMemFree(d_base);
+        tcpx_close_recv(recv_comm);
+        tcpx_close_listen(listen_comm);
+        cuDevicePrimaryCtxRelease(cuDev);
+        return 1;
+      }
+      std::memset(host_aligned, 0, kRegisteredBytes);
+      recv_buf = host_aligned;
+      recv_ptr_type = NCCL_PTR_HOST;
+      std::cout << "[DEBUG] Host-recv debug enabled; host buffer=" << recv_buf << std::endl;
+    } else {
+      recv_buf = reinterpret_cast<void*>(d_aligned);
+      recv_ptr_type = NCCL_PTR_CUDA;
+    }
+
+    if (tcpx_reg_mr(recv_comm, recv_buf, kRegisteredBytes, recv_ptr_type, &recv_mhandle) != 0) {
       std::cout << "[DEBUG] ERROR: tcpx_reg_mr (recv) failed" << std::endl;
       cuMemFree(d_base);
       tcpx_close_recv(recv_comm);
@@ -256,7 +280,7 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    void* recv_data[1] = {reinterpret_cast<void*>(d_aligned)};
+    void* recv_data[1] = {recv_buf};
     int recv_sizes[1] = {static_cast<int>(payload_bytes)};
     int recv_tags[1] = {kTransferTag};
     void* recv_mhandles[1] = {recv_mhandle};
@@ -292,10 +316,16 @@ int main(int argc, char** argv) {
 
     std::vector<unsigned char> host(payload_bytes, 0);
     bool success = false;
-    // Ensure NIC writes into device memory are visible before copying back
-    if (done) cuCtxSynchronize();
-    if (done && cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes),
-                           "cuMemcpyDtoH")) {
+    // Ensure NIC writes are visible before copying back (for CUDA path)
+    if (done && recv_ptr_type == NCCL_PTR_CUDA) cuCtxSynchronize();
+    bool copy_ok = false;
+    if (done && recv_ptr_type == NCCL_PTR_CUDA) {
+      copy_ok = cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes), "cuMemcpyDtoH");
+    } else if (done && recv_ptr_type == NCCL_PTR_HOST) {
+      std::memcpy(host.data(), recv_buf, payload_bytes);
+      copy_ok = true;
+    }
+    if (done && copy_ok) {
       std::cout << "[DEBUG] Receive completed, bytes=" << received_size << std::endl;
       dump_hex(host.data(), std::min<size_t>(payload_bytes, 32));
       size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);
@@ -398,6 +428,15 @@ int main(int argc, char** argv) {
                "cuMemcpyHtoD");
     // Make sure device buffer contents are visible before zero-copy send kicks in
     cuCtxSynchronize();
+    // Debug: verify device buffer content before send
+    {
+      size_t dump = std::min<size_t>(payload_bytes, 32);
+      std::vector<unsigned char> verify(dump, 0);
+      if (cuda_check(cuMemcpyDtoH(verify.data(), d_aligned, dump), "pre-send cuMemcpyDtoH")) {
+        std::cout << "[DEBUG] Client GPU buffer prefix (" << dump << "):" << std::endl;
+        dump_hex(verify.data(), dump);
+      }
+    }
 
     void* send_mhandle = nullptr;
     if (tcpx_reg_mr(send_comm, reinterpret_cast<void*>(d_aligned),
