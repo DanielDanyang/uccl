@@ -196,3 +196,49 @@ export NCCL_DEBUG_SUBSYS=NET
 3. **需要恢复默认环境**：本地 README 之前为了调试 EFAULT 手动设置了 `NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=0` 与 `UCCL_TCPX_FORCE_HOST_RECV=1`，这些变量会绕过官方路径，现已移除，云端环境也需要同步更新。
 4. **CUDA 上下文初始化**：确保 server/client 在 TCPX 初始化前调用 `cudaSetDevice(dev_id);`（或 `cudaFree(0);`），避免 `gpu_current_dev`/`cuCtxSetCurrent` 返回错误，导致 gpumemd 交互失败。
 
+
+## 🧪 常见异常与修复
+
+1) tcpx_accept_v5 返回 rc=0 但 recv_comm=(nil)
+- 现象：日志反复打印 rc=0，但 recv_comm 为空；随后 server 侧控制通道 recvfrom 只收 16B 就被对端关闭
+- 根因：部分实现需要“调用方提供 device handle 存储缓冲区”。若未提供，连接握手只发送了最小头部（16B），未携带完整 128B 控制负载，导致对端关闭
+- 修复：
+  - Server：预分配 recv_dev_handle_storage[512] 并将其地址传入 tcpx_accept_v5
+  - Client：同样预分配 send_dev_handle_storage[512]，不要把 send_dev_handle 设为 nullptr 交给插件
+  - 代码示例见 test_tcpx_transfer.cc 中客户端 connect 前的注释
+
+2) 控制通道只收/发 16 字节（预期 128B）
+- 现象：strace 显示 sendto(...,16) / recvfrom(...)=16，紧接着连接被关闭
+- 根因：未完成 device handle 交换（见问题 1），或未按 4KB 对齐注册 CUDA 缓冲区导致握手早退
+- 修复：
+  - 确保 connect/accept 前后都提供有效的 device handle 缓冲
+  - CUDA 缓冲必须 4KB 对齐；示例中使用 cudaMalloc(4KB+4KB) 后手动对齐
+
+3) tcpx_connect_v5 返回 rc=0 但 send_dev_handle=(nil)
+- 根因：实现要求“调用方自行提供句柄存储”，插件不会分配
+- 修复：预分配 alignas(16) unsigned char send_dev_handle_storage[512] = {0}; 再把指针传入 connect
+
+4) Zero-Copy 发送伴随 MSG_ERRQUEUE 循环
+- 现象：sendmsg(..., MSG_ZEROCOPY)=24 后，持续 recvmsg(..., MSG_ERRQUEUE)=EAGAIN/0
+- 解释：内核错误队列用于 zcopy 完成/错误信号，短暂的 EAGAIN 属正常现象，最终只要 tcpx_test 返回 done=1 即可
+- 若长期卡住：检查流表/队列映射与 gpumemd 路径，确保网络/PCI 绑核合理
+
+5) tcpx_test 报告 bytes=0，而 socket 统计 All bytes: 24
+- 解释：对 send 请求，NCCL 插件的 test 通常不回填 size（仅对 recv 有意义）。内核层统计了 24B 控制负载属正常
+
+6) 连接时序/空轮询
+- 说明：某些实现的 accept 是“渐进式”的，可能 rc=0 但需要多轮调用才能得到非空 recv_comm
+- 做法：像示例一样循环调用 accept，期间 sleep(100ms) 并打印提示
+
+7) gpumemd/DMABUF 相关
+- 必须确认两端 gpumemd 服务运行，UNIX 前缀与 PCI 匹配；建议统一：
+  - NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=1
+  - NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX=/run/tcpx
+  - NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE=1
+
+8) 仍有 16B 控制消息时的进一步诊断
+- 打开详细日志
+  - export NCCL_DEBUG=TRACE; export NCCL_DEBUG_SUBSYS=ALL
+  - export UCCL_TCPX_DEBUG=1
+- 双端同时 strace -f -e trace=network -p <pid> 观察 sendto/recvfrom 长度
+- 确认 bootstrap 句柄交换完整（128B），确认 accept 循环内 rc=0 但 recv_comm 为空的次数
