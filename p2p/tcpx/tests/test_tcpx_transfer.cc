@@ -134,6 +134,8 @@ int main(int argc, char** argv) {
   setenv("UCCL_TCPX_DEBUG", "1", 0);
   setenv("NCCL_MIN_ZCOPY_SIZE", "4096", 0);  // Force <4KB to copy path
   setenv("NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE", "4096", 0);  // Plugin-specific backup
+  // Optional: make receive path more deterministic during debug
+  setenv("NCCL_GPUDIRECTTCPX_RECV_SYNC", "1", 0);
 
   std::cout << "[DEBUG] === TCPX GPU-to-GPU transfer test ===" << std::endl;
   if (argc < 2) {
@@ -158,6 +160,7 @@ int main(int argc, char** argv) {
       payload_bytes = static_cast<size_t>(v);
     }
   }
+  std::cout << "[DEBUG] Using payload_bytes=" << payload_bytes << std::endl;
 
   if (is_server) {
     std::cout << "[DEBUG] Running in SERVER mode" << std::endl;
@@ -289,6 +292,8 @@ int main(int argc, char** argv) {
 
     std::vector<unsigned char> host(payload_bytes, 0);
     bool success = false;
+    // Ensure NIC writes into device memory are visible before copying back
+    if (done) cuCtxSynchronize();
     if (done && cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes),
                            "cuMemcpyDtoH")) {
       std::cout << "[DEBUG] Receive completed, bytes=" << received_size << std::endl;
@@ -391,6 +396,8 @@ int main(int argc, char** argv) {
     if (payload_bytes > prefix) host_payload[payload_bytes - 1] = 0xAB;  // sentinel
     cuda_check(cuMemcpyHtoD(d_aligned, host_payload.data(), payload_bytes),
                "cuMemcpyHtoD");
+    // Make sure device buffer contents are visible before zero-copy send kicks in
+    cuCtxSynchronize();
 
     void* send_mhandle = nullptr;
     if (tcpx_reg_mr(send_comm, reinterpret_cast<void*>(d_aligned),
