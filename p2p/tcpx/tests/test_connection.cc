@@ -240,6 +240,15 @@ int main(int argc, char* argv[]) {
     // Test data transfer - receive data from client
     std::cout << "\n[Step 4] Testing data transfer (receive)..." << std::endl;
 
+    // Print current environment variables for debugging
+    std::cout << "Environment check:" << std::endl;
+    const char* socket_if = getenv("NCCL_SOCKET_IFNAME");
+    const char* tcpx_if = getenv("NCCL_GPUDIRECTTCPX_SOCKET_IFNAME");
+    const char* rxmem_import = getenv("NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT");
+    std::cout << "  NCCL_SOCKET_IFNAME=" << (socket_if ? socket_if : "not set") << std::endl;
+    std::cout << "  NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=" << (tcpx_if ? tcpx_if : "not set") << std::endl;
+    std::cout << "  NCCL_TCPX_RXMEM_IMPORT_USE_GPU_PCI_CLIENT=" << (rxmem_import ? rxmem_import : "not set") << std::endl;
+
     // Try GPU receive first (NCCL_PTR_CUDA). Fallback to host if CUDA fails.
     const char* forceHost = std::getenv("UCCL_TCPX_FORCE_HOST_RECV");
     bool want_cuda = !(forceHost && *forceHost == '1');
@@ -298,16 +307,18 @@ int main(int argc, char* argv[]) {
     }
 
     if (!did_cuda) {
-// ===== Allocate receive buffer (prefer mmap + mlock; fallback to posix_memalign/new) =====
+// ===== Allocate receive buffer with better alignment and error handling =====
 size_t const buffer_size = 1024;
+size_t const page_size = 4096;  // Force 4KB alignment for TCPX
 void*   recv_mmap   = MAP_FAILED;
 void*   recv_aligned = nullptr;
 char*   recv_buffer = nullptr;
 bool    used_mmap   = false;
 bool    used_posix  = false;
 
-// 1) mmap 优先
-recv_mmap = mmap(nullptr, buffer_size,
+// 1) Try mmap with explicit alignment
+size_t aligned_size = (buffer_size + page_size - 1) & ~(page_size - 1);
+recv_mmap = mmap(nullptr, aligned_size,
                  PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS
 #ifdef MAP_POPULATE
@@ -318,18 +329,22 @@ if (recv_mmap != MAP_FAILED) {
   used_mmap   = true;
   recv_buffer = static_cast<char*>(recv_mmap);
   memset(recv_buffer, 0, buffer_size);
+  printf("Using mmap buffer: addr=%p, size=%zu (aligned to %zu)\n",
+         recv_buffer, buffer_size, aligned_size);
   if (mlock(recv_buffer, buffer_size) != 0) {
-    perror("mlock"); 
+    perror("mlock failed, continuing without lock");
   }
-} else if (posix_memalign(&recv_aligned, 4096, buffer_size) == 0) {
+} else if (posix_memalign(&recv_aligned, page_size, aligned_size) == 0) {
   used_posix  = true;
   recv_buffer = static_cast<char*>(recv_aligned);
   memset(recv_buffer, 0, buffer_size);
+  printf("Using posix_memalign buffer: addr=%p, size=%zu (aligned to %zu)\n",
+         recv_buffer, buffer_size, page_size);
   if (mlock(recv_buffer, buffer_size) != 0) {
-    perror("mlock(posix)"); 
+    perror("mlock failed, continuing without lock");
   }
 } else {
-
+  printf("WARNING: Using unaligned buffer allocation\n");
   recv_buffer = new char[buffer_size];
   memset(recv_buffer, 0, buffer_size);
 }
