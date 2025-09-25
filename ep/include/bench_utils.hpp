@@ -15,15 +15,11 @@ struct BenchEnv {
   gpuDeviceProp prop{};
 };
 
-inline void init_env(BenchEnv& env, int blocks = kNumThBlocks, int device = 0,
-                     bool quiet = false) {
+inline void init_env(BenchEnv& env, int blocks = kNumThBlocks,
+                     int device = -1) {
   env.blocks = blocks;
-  GPU_RT_CHECK(gpuSetDevice(device));
+  if (device == -1) gpuGetDevice(&device);
   GPU_RT_CHECK(gpuGetDeviceProperties(&env.prop, device));
-  if (!quiet) {
-    std::printf("clock rate: %d kHz\n", env.prop.clockRate);
-  }
-
   GPU_RT_CHECK(gpuStreamCreate(&env.stream));
 
 #ifdef USE_GRACE_HOPPER
@@ -64,12 +60,12 @@ inline void destroy_env(BenchEnv& env) {
   }
 }
 
-inline Proxy::Config make_cfg(BenchEnv const& env, int block_idx, int rank,
+inline Proxy::Config make_cfg(BenchEnv const& env, int thread_idx, int rank,
                               char const* peer_ip, void* gpu_buffer = nullptr,
                               size_t total_size = 0, bool pin_thread = true) {
   Proxy::Config cfg{};
-  cfg.rb = &env.rbs[block_idx];
-  cfg.block_idx = block_idx;
+  cfg.ring_buffers.push_back(&env.rbs[thread_idx]);
+  cfg.thread_idx = thread_idx;
   cfg.rank = rank;
   cfg.peer_ip = peer_ip;
   cfg.gpu_buffer = gpu_buffer;
@@ -195,4 +191,14 @@ inline void print_summary(BenchEnv const& env, Stats const& s) {
               s.throughput_mops);
   std::printf("Total Throughput                  : %.2f Gbps\n",
               mops_to_gbps(s.throughput_mops));
+}
+
+template <typename dtype_t>
+dtype_t ceil_div(dtype_t a, dtype_t b) {
+  return (a + b - 1) / b;
+}
+
+template <typename dtype_t>
+dtype_t align(dtype_t a, dtype_t b) {
+  return ceil_div<dtype_t>(a, b) * b;
 }
