@@ -41,7 +41,7 @@ mpirun --allow-run-as-root -np ${NUM_PROCS} -N ${PROCS_PER_NODE} \
     --mca btl_tcp_if_include eth0 \
     --mca plm_rsh_args "-p 2222" \
     -x PATH="/usr/local/cuda/bin:/usr/local/nvidia/bin:$PATH" \
-    -x LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/nvidia/lib64:/var/lib/tcpx/lib64:$LD_LIBRARY_PATH" \
+    -x LD_LIBRARY_PATH="/usr/local/tcpx/lib64:$UCCL_HOME/thirdparty/nccl/build/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib64:/var/lib/tcpx/lib64:$LD_LIBRARY_PATH" \
     -x NCCL_IGNORE_CPU_AFFINITY=1 \
     -x NCCL_ALGO=Ring \
     -x NCCL_PROTO=Simple \
@@ -67,7 +67,7 @@ mpirun --allow-run-as-root -np ${NUM_PROCS} -N ${PROCS_PER_NODE} \
     -x NCCL_NET_GDR_LEVEL=PIX \
     -x NCCL_P2P_PXN_LEVEL=0 \
     -x NCCL_DEBUG=INFO \
-    -x NCCL_DEBUG_SUBSYS=ENV \
+    -x NCCL_DEBUG_SUBSYS=NET \
     ${UCCL_HOME}/thirdparty/nccl-tests/build/${PROG_NAME} -c 0 \
     -b 1K -e 1G \
     -f 2 -w 50 -n 50 \
