@@ -54,8 +54,9 @@ constexpr size_t kRegisteredBytes = 4096;      // 4 KB aligned allocation.
 // Fix: Use strlen semantics (sizeof-1), force <4KB to copy path at runtime to avoid small packet zero-copy.
 
 constexpr char kTestMessage[] = "Hello from TCPX client!";
-// Send only visible character length, avoid including string terminator '\0'
-constexpr size_t kPayloadBytes = sizeof(kTestMessage) - 1;  // strlen(kTestMessage)
+// Default payload length (visible chars only). Can be overridden by env
+// UCCL_TCPX_PAYLOAD_BYTES up to kRegisteredBytes.
+constexpr size_t kDefaultPayloadBytes = sizeof(kTestMessage) - 1;
 constexpr int kTransferTag = 42;  // Payload tag
 constexpr int kAcceptMaxRetries = 120;         // ~12 s (100 ms per retry).
 
@@ -146,6 +147,17 @@ int main(int argc, char** argv) {
   }
   int dev_id = 0;
   bool is_server = std::strcmp(argv[1], "server") == 0;
+
+  // Resolve payload size (can be overridden via env UCCL_TCPX_PAYLOAD_BYTES)
+  size_t payload_bytes = kDefaultPayloadBytes;
+  if (const char* p = std::getenv("UCCL_TCPX_PAYLOAD_BYTES")) {
+    char* endp = nullptr;
+    unsigned long v = std::strtoul(p, &endp, 10);
+    if (endp && *endp == '\0' && v > 0) {
+      if (v > kRegisteredBytes) v = kRegisteredBytes;
+      payload_bytes = static_cast<size_t>(v);
+    }
+  }
 
   if (is_server) {
     std::cout << "[DEBUG] Running in SERVER mode" << std::endl;
@@ -242,7 +254,7 @@ int main(int argc, char** argv) {
     }
 
     void* recv_data[1] = {reinterpret_cast<void*>(d_aligned)};
-    int recv_sizes[1] = {static_cast<int>(kPayloadBytes)};
+    int recv_sizes[1] = {static_cast<int>(payload_bytes)};
     int recv_tags[1] = {kTransferTag};
     void* recv_mhandles[1] = {recv_mhandle};
     void* recv_request = nullptr;
@@ -275,13 +287,17 @@ int main(int argc, char** argv) {
       if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
 
-    std::vector<unsigned char> host(kPayloadBytes, 0);
+    std::vector<unsigned char> host(payload_bytes, 0);
     bool success = false;
-    if (done && cuda_check(cuMemcpyDtoH(host.data(), d_aligned, kPayloadBytes),
+    if (done && cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes),
                            "cuMemcpyDtoH")) {
       std::cout << "[DEBUG] Receive completed, bytes=" << received_size << std::endl;
-      dump_hex(host.data(), kPayloadBytes);
-      success = std::memcmp(host.data(), kTestMessage, kPayloadBytes) == 0;
+      dump_hex(host.data(), std::min<size_t>(payload_bytes, 32));
+      size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);
+      bool prefix_ok = std::memcmp(host.data(), kTestMessage, prefix) == 0;
+      bool tail_ok = true;
+      if (payload_bytes > prefix) tail_ok = host[payload_bytes - 1] == 0xAB;
+      success = prefix_ok && tail_ok;
       if (success) {
         std::cout << "[DEBUG] SUCCESS: payload matches expected string" << std::endl;
         // Notify client it is safe to close by sending a 1-byte ACK on bootstrap TCP
@@ -364,22 +380,16 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    // PROBLEM CODE START POINT (Client side):
-    // Historical issues:
-    //   1) Using sizeof(kTestMessage) as size, including '\0' caused 25 vs 24B difference;
-    //   2) Small packet triggered MSG_ZEROCOPY, kernel errqueue flakiness, actually not completed;
-    //   3) After send completion, didn't wait for server confirmation, client closed first,
-    //      server only saw 16B control message then peer closed.
-    // Solution:
-    //   - Fixed to use strlen semantics (kPayloadBytes already = sizeof-1), consistent with logs/transport;
-    //   - Runtime force <4KB to copy path, avoid small packet zero-copy;
-    //   - Removed incorrect ACK logic (send_comm cannot receive in TCPX model).
+    // Prepare payload in host memory according to payload_bytes
 
     uintptr_t addr = static_cast<uintptr_t>(d_base);
     addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);
     d_aligned = static_cast<CUdeviceptr>(addr);
-    cuda_check(cuMemsetD8(d_aligned, 0, kRegisteredBytes), "cuMemsetD8");
-    cuda_check(cuMemcpyHtoD(d_aligned, kTestMessage, kPayloadBytes),
+    std::vector<unsigned char> host_payload(payload_bytes, 0);
+    size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);
+    if (prefix) std::memcpy(host_payload.data(), kTestMessage, prefix);
+    if (payload_bytes > prefix) host_payload[payload_bytes - 1] = 0xAB;  // sentinel
+    cuda_check(cuMemcpyHtoD(d_aligned, host_payload.data(), payload_bytes),
                "cuMemcpyHtoD");
 
     void* send_mhandle = nullptr;
@@ -394,7 +404,7 @@ int main(int argc, char** argv) {
 
     void* send_request = nullptr;
     if (tcpx_isend(send_comm, reinterpret_cast<void*>(d_aligned),
-                   static_cast<int>(kPayloadBytes), kTransferTag, send_mhandle,
+                   static_cast<int>(payload_bytes), kTransferTag, send_mhandle,
                    &send_request) != 0) {
       std::cout << "[DEBUG] ERROR: tcpx_isend failed" << std::endl;
       tcpx_dereg_mr(send_comm, send_mhandle);
