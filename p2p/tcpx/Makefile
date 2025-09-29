@@ -28,7 +28,7 @@ device/unpack_kernels.o: device/unpack_kernels.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 device/unpack_launch.o: device/unpack_launch.cc
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 # Original tests (legacy)
 test_device_discovery:
@@ -115,6 +115,8 @@ run_benchmark: benchmark_tcpx_unpack
 
 # Clean built files
 clean:
+	@echo "Cleaning build artifacts..."
 	rm -f tests/test_* tests/benchmark_* $(RX_OBJS) $(DEVICE_OBJS) *.o
+	@echo "Clean completed."
 
-.PHONY: all test clean unpack_tests all_tests no-cuda run_unpack_tests run_benchmark
+.PHONY: all test clean unpack_tests all_tests no-cuda run_unpack_tests run_benchmark build_all quick_test

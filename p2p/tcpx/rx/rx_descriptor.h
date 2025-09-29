@@ -10,12 +10,8 @@
 #include <vector>
 #include "rx_cmsg_parser.h"
 
-#ifdef __CUDACC__
+// CUDA headers - let the build system handle this
 #include <cuda_runtime.h>
-#elif !defined(CUDA_RUNTIME_H)
-// Dummy CUDA types for non-CUDA builds (only if not already defined)
-typedef void* cudaStream_t;
-#endif
 
 namespace tcpx {
 namespace rx {
