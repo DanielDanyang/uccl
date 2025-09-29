@@ -281,14 +281,18 @@ int main(int argc, char** argv) {
     }
     std::cout << "[DEBUG] Connection accepted; recv_comm=" << recv_comm << std::endl;
 
-    // ===== 【问题代码区�?：服务端GPU缓冲区分配与对齐�?=====
-    // 这里是TCPX传输问题的第一个关键环节：GPU内存分配�?KB对齐
-    // 历史问题：如果GPU内存没有正确对齐�?KB边界，tcpx_reg_mr会失�?    // 或者即使注册成功，GPUDirect TCPX的DMA传输也可能出现数据损�?    CUdevice cuDev = 0;
+    // ===== 【问题代码区�?：服务端GPU缓冲区分配与对齐�?=====
+    // 这里是TCPX传输问题的第一个关键环节：GPU内存分配�?KB对齐
+    // 历史问题：如果GPU内存没有正确对齐�?KB边界，tcpx_reg_mr会失�?    // 或者即使注册成功，GPUDirect TCPX的DMA传输也可能出现数据损�?    CUdevice cuDev = 0;
     CUcontext cuCtx = nullptr;
-    CUdeviceptr d_base = 0;      // 原始分配的GPU内存地址（可能未对齐�?    CUdeviceptr d_aligned = 0;   // 4KB对齐后的GPU内存地址（用于TCPX注册�?
+    CUdeviceptr d_base = 0;      // 原始分配的GPU内存地址（可能未对齐�?    CUdeviceptr d_aligned = 0;   // 4KB对齐后的GPU内存地址（用于TCPX注册�?
     // CUDA初始化和GPU内存分配
-    // 注意：这里分�?kRegisteredBytes + 4096 是为了确保有足够空间进行4KB对齐
-    // 因为原始地址可能不在4KB边界上，需要向上调整到最近的4KB边界
+    // Note: Allocate kRegisteredBytes + 4096 to ensure enough space for 4KB alignment
+    // because original address may not be on 4KB boundary, need to adjust up to nearest 4KB boundary
+    CUdevice cuDev;
+    CUcontext cuCtx;
+    CUdeviceptr d_base = 0;
+
     if (!cuda_check(cuInit(0), "cuInit") ||
         !cuda_check(cuDeviceGet(&cuDev, dev_id), "cuDeviceGet") ||
         !cuda_check(cuDevicePrimaryCtxRetain(&cuCtx, cuDev), "cuDevicePrimaryCtxRetain") ||
@@ -300,34 +304,27 @@ int main(int argc, char** argv) {
       tcpx_close_listen(listen_comm);
       return 1;
     }
-    if (cudaSetDevice(dev_id) != cudaSuccess) {
-      std::cout << "[DEBUG] ERROR: cudaSetDevice failed" << std::endl;
-      if (use_host_recv && recv_buf) cudaFreeHost(recv_buf);
-      cuMemFree(d_base);
-      tcpx_close_recv(recv_comm);
-      tcpx_close_listen(listen_comm);
-      cuDevicePrimaryCtxRelease(cuDev);
-      return 1;
-    }
-    // Align GPU buffer to the nearest 4KB boundary for GPUDirect TCPX.
-    uintptr_t addr = static_cast<uintptr_t>(d_base);
-    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);  // 4KB aligned
-              << std::dec << " (原始地址: 0x" << std::hex << d_base << std::dec << ")" << std::endl;
 
     // Allow host receive debug path via env to isolate GPUDirect issues
     const char* host_recv_dbg = std::getenv("UCCL_TCPX_HOST_RECV_DEBUG");
     bool use_host_recv = false;
+    void* recv_buf = nullptr;
+
     if (host_recv_dbg) {
       char c = host_recv_dbg[0];
       if (c == '1' || c == 't' || c == 'T' || c == 'y' || c == 'Y') {
         use_host_recv = true;
       }
     }
+
+    // Align GPU buffer to the nearest 4KB boundary for GPUDirect TCPX.
+    uintptr_t addr = static_cast<uintptr_t>(d_base);
+    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);  // 4KB aligned
+    CUdeviceptr d_aligned = static_cast<CUdeviceptr>(addr);
+    std::cout << "[DEBUG] GPU buffer aligned to 0x" << std::hex << d_aligned
+              << std::dec << " (original address: 0x" << std::hex << d_base << std::dec << ")" << std::endl;
+
     void* recv_mhandle = nullptr;
-    void* recv_buf = nullptr;
-    int recv_ptr_type = NCCL_PTR_CUDA;
-    void* recv_mhandle = nullptr;
-    void* recv_buf = nullptr;
     int recv_ptr_type = NCCL_PTR_CUDA;
     if (use_host_recv) {
       void* host_aligned = nullptr;
@@ -348,14 +345,14 @@ int main(int argc, char** argv) {
       recv_ptr_type = NCCL_PTR_CUDA;
     }
 
-    // ===== �����������??��������ڴ�ע������������ύ??=====
-    // �����ǵڶ����ؼ�����㣺��GPU�ڴ�ע�ᵽTCPX���ύ�첽������??    // ��ʷ����������??    // 1. ����ڴ�ע��ʧ�ܣ�ͨ������ΪGPU�ڴ�??KB�����gpumemd����δ��??    // 2. ���tcpx_irecvʧ�ܣ�������recv_comm�����Ч���ڴ���������
+    // ===== �����������??��������ڴ�ע������������ύ??=====
+    // �����ǵڶ����ؼ�����㣺��GPU�ڴ�ע�ᵽTCPX���ύ�첽������??    // ��ʷ����������??    // 1. ����ڴ�ע��ʧ�ܣ�ͨ������ΪGPU�ڴ�??KB�����gpumemd����δ��??    // 2. ���tcpx_irecvʧ�ܣ�������recv_comm�����Ч���ڴ���������
 
-    // ===== 【问题代码区�?：服务端内存注册与接收请求提交�?=====
-    // 这里是第二个关键问题点：将GPU内存注册到TCPX并提交异步接收请�?    // 历史问题根因分析�?    // 1. 如果内存注册失败，通常是因为GPU内存�?KB对齐或gpumemd服务未运�?    // 2. 如果tcpx_irecv失败，可能是recv_comm句柄无效或内存句柄有问题
+    // ===== 【问题代码区�?：服务端内存注册与接收请求提交�?=====
+    // 这里是第二个关键问题点：将GPU内存注册到TCPX并提交异步接收请�?    // 历史问题根因分析�?    // 1. 如果内存注册失败，通常是因为GPU内存�?KB对齐或gpumemd服务未运�?    // 2. 如果tcpx_irecv失败，可能是recv_comm句柄无效或内存句柄有问题
     if (tcpx_reg_mr(recv_comm, recv_buf, kRegisteredBytes, recv_ptr_type, &recv_mhandle) != 0) {
-      std::cout << "[DEBUG] 错误：服务端内存注册失败 (tcpx_reg_mr)" << std::endl;
-      std::cout << "[DEBUG] 可能原因�?)GPU内存�?KB对齐 2)gpumemd服务未运�?3)DMABUF权限问题" << std::endl;
+      std::cout << "[DEBUG] ERROR: Server memory registration failed (tcpx_reg_mr)" << std::endl;
+      std::cout << "[DEBUG] Possible causes: 1)GPU memory not 4KB aligned 2)gpumemd service not running 3)DMABUF permission issue" << std::endl;
       if (use_host_recv && recv_buf) cudaFreeHost(recv_buf);
       cuMemFree(d_base);
       tcpx_close_recv(recv_comm);
@@ -363,18 +360,27 @@ int main(int argc, char** argv) {
       cuDevicePrimaryCtxRelease(cuDev);
       return 1;
     }
-    std::cout << "[DEBUG] 服务端内存注册成�? recv_mhandle=" << recv_mhandle
-              << ", 缓冲�?" << recv_buf << ", 大小=" << kRegisteredBytes << "字节" << std::endl;
+    std::cout << "[DEBUG] Server memory registration successful, recv_mhandle=" << recv_mhandle
+              << ", buffer=" << recv_buf << ", size=" << kRegisteredBytes << " bytes" << std::endl;
 
-    // 准备异步接收请求的参数数�?    // TCPX API使用数组形式支持批量操作，这里只有一个接收操�?    void* recv_data[1] = {recv_buf};                              // 接收缓冲区地址
-    int recv_sizes[1] = {static_cast<int>(payload_bytes)};        // 期望接收的数据大�?    int recv_tags[1] = {kTransferTag};                            // 消息标签（用于匹配发送端�?    void* recv_mhandles[1] = {recv_mhandle};                      // 内存句柄
-    void* recv_request = nullptr;                                 // 异步请求句柄（用于后续轮询）
+    // Get payload size from environment or use default
+    const char* payload_env = std::getenv("UCCL_TCPX_PAYLOAD_BYTES");
+    size_t payload_bytes = payload_env ? std::atoi(payload_env) : kDefaultPayloadBytes;
+    if (payload_bytes > kRegisteredBytes) payload_bytes = kRegisteredBytes;
 
-    // 【关键步骤】提交异步接收请�?    // 这里是历史问题的核心：如果这一步成功但后续只收�?6B控制消息�?    // 说明客户端的发送有问题（通常是小包zero-copy路径异常或过早关闭连接）
+    // Prepare async receive request parameter arrays
+    // TCPX API uses array format to support batch operations, here we only have one receive operation
+    void* recv_data[1] = {recv_buf};                              // Receive buffer address
+    int recv_sizes[1] = {static_cast<int>(payload_bytes)};        // Expected data size to receive
+    int recv_tags[1] = {kTransferTag};                            // Message tag (for matching sender)
+    void* recv_mhandles[1] = {recv_mhandle};                      // Memory handle
+    void* recv_request = nullptr;                                 // Async request handle (for subsequent polling)
+
+    // 【关键步骤】提交异步接收请�?    // 这里是历史问题的核心：如果这一步成功但后续只收�?6B控制消息�?    // 说明客户端的发送有问题（通常是小包zero-copy路径异常或过早关闭连接）
     if (tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags,
                    recv_mhandles, &recv_request) != 0) {
-      std::cout << "[DEBUG] 错误：异步接收请求提交失�?(tcpx_irecv)" << std::endl;
-      std::cout << "[DEBUG] 可能原因�?)recv_comm句柄无效 2)内存句柄问题 3)参数不匹�? << std::endl;
+      std::cout << "[DEBUG] ERROR: Async receive request submission failed (tcpx_irecv)" << std::endl;
+      std::cout << "[DEBUG] Possible causes: 1)recv_comm handle invalid 2)memory handle issue 3)parameter mismatch" << std::endl;
       tcpx_dereg_mr(recv_comm, recv_mhandle);
       if (use_host_recv && recv_buf) cudaFreeHost(recv_buf);
       cuMemFree(d_base);
@@ -384,29 +390,31 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    // ===== 【问题代码区�?：服务端接收轮询与历史问题现场�?=====
+    // ===== 【问题代码区�?：服务端接收轮询与历史问题现场�?=====
     // 这里是历史问题的核心现场：服务端等待数据但只收到16B控制消息
     //
     // 【历史问题详细分析】：
-    // 1. 现象：服务端tcpx_irecv提交成功，但tcpx_test轮询时只收到16B控制消息�?    //    随后客户端连接关闭，payload数据永远没有到达，最终超�?    // 2. 根本原因�?    //    a) 客户端使用sizeof(kTestMessage)=25B，但实际发�?4B，大小不一�?    //    b) 小包(<4KB)触发MSG_ZEROCOPY路径，内核errqueue处理异常
+    // 1. 现象：服务端tcpx_irecv提交成功，但tcpx_test轮询时只收到16B控制消息�?    //    随后客户端连接关闭，payload数据永远没有到达，最终超�?    // 2. 根本原因�?    //    a) 客户端使用sizeof(kTestMessage)=25B，但实际发�?4B，大小不一�?    //    b) 小包(<4KB)触发MSG_ZEROCOPY路径，内核errqueue处理异常
     //    c) 客户端发送完成后立即关闭连接，没有等待服务端确认
-    // 3. 修复方案�?    //    a) 统一使用strlen语义(sizeof-1)，确保收发大小一�?    //    b) 强制<4KB走copy路径，避免小包zero-copy的errqueue问题
-    //    c) 客户端发送后增加延迟，给服务端处理时�?
-    std::cout << "[DEBUG] 开始等待客户端数据，期望大�?" << payload_bytes << "字节..." << std::endl;
-    int done = 0;           // 完成标志�?=未完成，1=已完�?    int received_size = 0;  // 实际接收到的字节�?
-    // 轮询接收完成状态，最多等待约2�?200000 * 10微秒)
-    // 如果在这个循环中一直done=0，说明数据没有到达（历史问题现场�?    for (int i = 0; i < 200000 && !done; ++i) {
+    // 3. 修复方案�?    //    a) 统一使用strlen语义(sizeof-1)，确保收发大小一�?    //    b) 强制<4KB走copy路径，避免小包zero-copy的errqueue问题
+    //    c) 客户端发送后增加延迟，给服务端处理时�?
+    std::cout << "[DEBUG] Starting to wait for client data, expected size: " << payload_bytes << " bytes..." << std::endl;
+    int done = 0;           // Completion flag: 0=not completed, 1=completed
+    int received_size = 0;  // Actually received bytes
+    // 轮询接收完成状态，最多等待约2�?200000 * 10微秒)
+    // 如果在这个循环中一直done=0，说明数据没有到达（历史问题现场�?    for (int i = 0; i < 200000 && !done; ++i) {
       int rc_test = tcpx_test(recv_request, &done, &received_size);
       if (rc_test != 0) {
-        std::cout << "[DEBUG] 错误：tcpx_test返回错误�?" << rc_test << std::endl;
-        std::cout << "[DEBUG] 这通常表示连接异常或请求句柄无�? << std::endl;
+        std::cout << "[DEBUG] ERROR: tcpx_test returned error code: " << rc_test << std::endl;
+        std::cout << "[DEBUG] This usually indicates connection error or invalid request handle" << std::endl;
         break;
       }
-      // �?0微秒检查一次，避免CPU占用过高
+      // �?0微秒检查一次，避免CPU占用过高
       if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
 
-      // �?000次迭�?�?0ms)打印一次进度，便于诊断卡住的位�?      if (i > 0 && i % 1000 == 0) {
-        std::cout << "[DEBUG] 轮询进度: " << i << "/200000, done=" << done
+      // Print progress every 1000 iterations (~10ms) to help diagnose stuck positions
+      if (i > 0 && i % 1000 == 0) {
+        std::cout << "[DEBUG] Polling progress: " << i << "/200000, done=" << done
                   << ", received_size=" << received_size << std::endl;
       }
     }
@@ -415,6 +423,7 @@ int main(int argc, char** argv) {
     bool success = false;
     bool copy_ok = false;
     size_t bytes_copied = 0;
+    void* recv_dev_handle = nullptr;  // Add missing variable
 
     if (!done) {
       std::cout << "[DEBUG] ERROR: receive timed out" << std::endl;
@@ -550,77 +559,77 @@ int main(int argc, char** argv) {
 
     // Prepare payload in host memory according to payload_bytes
 
-    // ===== 【问题代码区�?：客户端GPU缓冲区准备与内存注册�?=====
+    // ===== 【问题代码区�?：客户端GPU缓冲区准备与内存注册�?=====
     // 这里是客户端侧的关键问题区域：GPU内存对齐、数据准备和内存注册
 
-    // 【关键步�?】GPU内存4KB对齐（与服务端相同的要求�?    uintptr_t addr = static_cast<uintptr_t>(d_base);
+    // 【关键步�?】GPU内存4KB对齐（与服务端相同的要求�?    uintptr_t addr = static_cast<uintptr_t>(d_base);
     addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);  // 4KB对齐
     d_aligned = static_cast<CUdeviceptr>(addr);
 
-    // 【关键步�?】准备要发送的数据
-    // 历史问题：之前直接使用sizeof(kTestMessage)=25B，包含了'\0'终止�?    // 但传输层实际只处�?4B可见字符，造成大小不一致，触发各种异常
+    // 【关键步�?】准备要发送的数据
+    // 历史问题：之前直接使用sizeof(kTestMessage)=25B，包含了'\0'终止�?    // 但传输层实际只处�?4B可见字符，造成大小不一致，触发各种异常
     std::vector<unsigned char> host_payload(payload_bytes, 0);
-    size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);  // 只复制可见字�?    if (prefix) std::memcpy(host_payload.data(), kTestMessage, prefix);
+    size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);  // 只复制可见字�?    if (prefix) std::memcpy(host_payload.data(), kTestMessage, prefix);
     if (payload_bytes > prefix) host_payload[payload_bytes - 1] = 0xAB;  // 添加哨兵字节便于验证
 
     // 将数据从主机内存复制到GPU内存
     cuda_check(cuMemcpyHtoD(d_aligned, host_payload.data(), payload_bytes), "cuMemcpyHtoD");
 
-    // 【重要】确保GPU内存写入完成，避免zero-copy发送时读取到未完成的数�?    cuCtxSynchronize();
+    // 【重要】确保GPU内存写入完成，避免zero-copy发送时读取到未完成的数�?    cuCtxSynchronize();
 
     // 调试：发送前验证GPU缓冲区内容，确保数据正确
     {
       size_t dump = std::min<size_t>(payload_bytes, 32);
       std::vector<unsigned char> verify(dump, 0);
       if (cuda_check(cuMemcpyDtoH(verify.data(), d_aligned, dump), "pre-send cuMemcpyDtoH")) {
-        std::cout << "[DEBUG] 客户端GPU缓冲区内容验�?(�? << dump << "字节):" << std::endl;
+        std::cout << "[DEBUG] Client GPU buffer content verification (" << dump << " bytes):" << std::endl;
         dump_hex(verify.data(), dump);
       }
     }
 
-    // ===== 【问题代码区�?：客户端内存注册�?=====
+    // ===== 【问题代码区�?：客户端内存注册�?=====
     // 这里是客户端内存注册，如果失败通常是GPU内存对齐或gpumemd问题
     void* send_mhandle = nullptr;
     if (tcpx_reg_mr(send_comm, reinterpret_cast<void*>(d_aligned),
                     kRegisteredBytes, NCCL_PTR_CUDA, &send_mhandle) != 0) {
       std::cout << "[DEBUG] 错误：客户端内存注册失败 (tcpx_reg_mr)" << std::endl;
-      std::cout << "[DEBUG] 可能原因�?)GPU内存�?KB对齐 2)gpumemd服务未运�?3)send_comm句柄无效" << std::endl;
+      std::cout << "[DEBUG] 可能原因�?)GPU内存�?KB对齐 2)gpumemd服务未运�?3)send_comm句柄无效" << std::endl;
       cuMemFree(d_base);
       tcpx_close_send(send_comm);
       cuDevicePrimaryCtxRelease(cuDev);
       return 1;
     }
-    std::cout << "[DEBUG] 客户端内存注册成�? send_mhandle=" << send_mhandle << std::endl;
+    std::cout << "[DEBUG] 客户端内存注册成�? send_mhandle=" << send_mhandle << std::endl;
 
-    // ===== 【问题代码区�?：客户端异步发送与历史问题根源�?=====
-    // 这里是历史问题的根源：客户端发送逻辑和过早关闭连�?
+    // ===== 【问题代码区�?：客户端异步发送与历史问题根源�?=====
+    // 这里是历史问题的根源：客户端发送逻辑和过早关闭连�?
     void* send_request = nullptr;
-    // 【关键步骤】提交异步发送请�?    // 历史问题：这里成功提交，但由于小包zero-copy路径异常�?    // 实际只发送了16B控制消息，payload数据没有正确传输
+    // 【关键步骤】提交异步发送请�?    // 历史问题：这里成功提交，但由于小包zero-copy路径异常�?    // 实际只发送了16B控制消息，payload数据没有正确传输
     if (tcpx_isend(send_comm, reinterpret_cast<void*>(d_aligned),
                    static_cast<int>(payload_bytes), kTransferTag, send_mhandle,
                    &send_request) != 0) {
-      std::cout << "[DEBUG] 错误：异步发送请求提交失�?(tcpx_isend)" << std::endl;
-      std::cout << "[DEBUG] 可能原因�?)send_comm句柄无效 2)内存句柄问题 3)参数错误" << std::endl;
+      std::cout << "[DEBUG] 错误：异步发送请求提交失�?(tcpx_isend)" << std::endl;
+      std::cout << "[DEBUG] 可能原因�?)send_comm句柄无效 2)内存句柄问题 3)参数错误" << std::endl;
       tcpx_dereg_mr(send_comm, send_mhandle);
       cuMemFree(d_base);
       tcpx_close_send(send_comm);
       cuDevicePrimaryCtxRelease(cuDev);
       return 1;
     }
-    std::cout << "[DEBUG] 异步发送请求已提交，开始轮询完成状�?.." << std::endl;
+    std::cout << "[DEBUG] 异步发送请求已提交，开始轮询完成状�?.." << std::endl;
 
-    // 【关键步骤】轮询发送完成状�?    // 历史问题分析�?    // 1. 客户端这里可能返回done=1，但实际上只是控制消息发送完�?    // 2. 由于小包走了MSG_ZEROCOPY路径，errqueue处理异常，payload数据丢失
-    // 3. 客户端误以为发送成功，立即关闭连接，导致服务端只收�?6B控制消息
-    int done = 0;       // 发送完成标�?    int sent_size = 0;  // 实际发送的字节�?    for (int i = 0; i < 200000 && !done; ++i) {
+    // 【关键步骤】轮询发送完成状�?    // 历史问题分析�?    // 1. 客户端这里可能返回done=1，但实际上只是控制消息发送完�?    // 2. 由于小包走了MSG_ZEROCOPY路径，errqueue处理异常，payload数据丢失
+    // 3. 客户端误以为发送成功，立即关闭连接，导致服务端只收�?6B控制消息
+    int done = 0;       // 发送完成标�?    int sent_size = 0;  // 实际发送的字节�?    for (int i = 0; i < 200000 && !done; ++i) {
       int rc_test = tcpx_test(send_request, &done, &sent_size);
       if (rc_test != 0) {
-        std::cout << "[DEBUG] 错误：tcpx_test返回错误�?" << rc_test << std::endl;
+        std::cout << "[DEBUG] 错误：tcpx_test返回错误�?" << rc_test << std::endl;
         break;
       }
       if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
 
-      // �?000次迭代打印进�?      if (i > 0 && i % 1000 == 0) {
-        std::cout << "[DEBUG] 发送轮询进�? " << i << "/200000, done=" << done
+      // �?000次迭代打印进�?      if (i > 0 && i % 1000 == 0) {
+        std::cout << "[DEBUG] 发送轮询进�? " << i << "/200000, done=" << done
                   << ", sent_size=" << sent_size << std::endl;
       }
     }
@@ -628,17 +637,17 @@ int main(int argc, char** argv) {
     if (done) {
       std::cout << "[DEBUG] 发送完成，实际发送字节数=" << sent_size
                 << " (期望=" << payload_bytes << ")" << std::endl;
-      // 检查发送字节数是否与期望一�?      if (sent_size != static_cast<int>(payload_bytes)) {
-        std::cout << "[DEBUG] 警告：发送字节数不匹配！这可能表示部分数据丢�? << std::endl;
+      // 检查发送字节数是否与期望一�?      if (sent_size != static_cast<int>(payload_bytes)) {
+        std::cout << "[DEBUG] Warning: Send byte count mismatch! This may indicate partial data loss" << std::endl;
       }
     } else {
       std::cout << "[DEBUG] 警告：发送在超时前未完成，可能存在网络或传输问题" << std::endl;
     }
 
-    // ===== 【问题代码区�?：客户端等待服务端确认，避免过早关闭�?=====
+    // ===== 【问题代码区�?：客户端等待服务端确认，避免过早关闭�?=====
     // 这里是修复历史问题的关键：通过bootstrap TCP连接等待服务端ACK
     // 历史问题：客户端发送完成后立即关闭TCPX连接，服务端来不及处理payload
-    // 修复方案：复用bootstrap TCP连接，等待服务端发�?字节ACK确认收到数据
+    // 修复方案：复用bootstrap TCP连接，等待服务端发�?字节ACK确认收到数据
     std::cout << "[DEBUG] 等待服务端通过bootstrap连接发送ACK确认..." << std::endl;
     if (bootstrap_fd >= 0) {
       // 设置2秒接收超时，避免无限等待
@@ -647,7 +656,7 @@ int main(int argc, char** argv) {
       char ack = 0;
       ssize_t r = recv(bootstrap_fd, &ack, 1, 0);
       if (r == 1 && ack == 1) {
-        std::cout << "[DEBUG] 已收到服务端ACK确认，数据传输成�? << std::endl;
+        std::cout << "[DEBUG] Received server ACK confirmation, data transfer successful" << std::endl;
       } else {
         std::cout << "[DEBUG] 警告：未收到服务端ACK，可能传输有问题 (recv返回=" << r << ", ack=" << (int)ack << ")" << std::endl;
       }
