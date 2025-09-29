@@ -78,8 +78,48 @@ test_performance:
 		echo "Missing files for test_performance"; \
 	fi
 
+# Modular tests with GTest (if available)
+test_rx_cmsg_parser_gtest: $(RX_OBJS)
+	$(CXX) $(CXXFLAGS) -o tests/test_rx_cmsg_parser_gtest tests/test_rx_cmsg_parser.cc $(RX_OBJS) $(LIBS) -lgtest -lgtest_main
+
+test_rx_descriptor_gtest: $(RX_OBJS)
+	$(CXX) $(CXXFLAGS) -o tests/test_rx_descriptor_gtest tests/test_rx_descriptor.cc $(RX_OBJS) $(LIBS) -lgtest -lgtest_main
+
+test_device_unpack_gtest: $(RX_OBJS) $(DEVICE_OBJS)
+	$(NVCC) $(NVCCFLAGS) -o tests/test_device_unpack_gtest tests/test_device_unpack.cu $(RX_OBJS) $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS) -lgtest -lgtest_main
+
+test_tcpx_integration_gtest: $(RX_OBJS) $(DEVICE_OBJS)
+	$(NVCC) $(NVCCFLAGS) -o tests/test_tcpx_integration_gtest tests/test_tcpx_integration.cc $(RX_OBJS) $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS) -lgtest -lgtest_main
+
+# Simplified tests without GTest (standalone)
+test_rx_cmsg_parser: $(RX_OBJS)
+	@echo "Building simplified RX CMSG Parser test..."
+	$(CXX) $(CXXFLAGS) -DSTANDALONE_TEST -o tests/test_rx_cmsg_parser tests/test_rx_cmsg_parser.cc $(RX_OBJS) $(LIBS)
+
+test_rx_descriptor: $(RX_OBJS)
+	@echo "Building simplified RX Descriptor test..."
+	$(CXX) $(CXXFLAGS) -DSTANDALONE_TEST -o tests/test_rx_descriptor tests/test_rx_descriptor.cc $(RX_OBJS) $(LIBS)
+
+test_device_unpack: $(RX_OBJS) $(DEVICE_OBJS)
+	@echo "Building simplified Device Unpack test..."
+	$(NVCC) $(NVCCFLAGS) -DSTANDALONE_TEST -o tests/test_device_unpack tests/test_device_unpack.cu $(RX_OBJS) $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS)
+
+test_tcpx_integration: $(RX_OBJS) $(DEVICE_OBJS)
+	@echo "Building simplified Integration test..."
+	$(NVCC) $(NVCCFLAGS) -DSTANDALONE_TEST -o tests/test_tcpx_integration tests/test_tcpx_integration.cc $(RX_OBJS) $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS)
+
+benchmark_tcpx_unpack: $(RX_OBJS) $(DEVICE_OBJS)
+	@echo "Building performance benchmark..."
+	$(NVCC) $(NVCCFLAGS) -o tests/benchmark_tcpx_unpack tests/benchmark_tcpx_unpack.cc $(RX_OBJS) $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS)
+
 # Build targets
 all: core test_build_simple test_tcpx_transfer
+
+# All tests including unit tests (standalone, no GTest required)
+all_tests: all test_rx_cmsg_parser test_rx_descriptor test_device_unpack test_tcpx_integration benchmark_tcpx_unpack
+
+# GTest-based tests (if GTest is available)
+gtest_tests: test_rx_cmsg_parser_gtest test_rx_descriptor_gtest test_device_unpack_gtest test_tcpx_integration_gtest
 
 # Quick test - just core components
 quick: core test_build_simple
@@ -100,10 +140,16 @@ check:
 	@echo "Built objects:"
 	@ls -la $(RX_OBJS) $(DEVICE_OBJS) 2>/dev/null || echo "No objects built yet"
 
-# Clean built files
+# Clean built files (ONLY executables and objects, NOT source files)
 clean:
 	@echo "Cleaning build artifacts..."
-	rm -f tests/test_* tests/benchmark_* $(RX_OBJS) $(DEVICE_OBJS) *.o
-	@echo "Clean completed."
+	@echo "Removing executable files..."
+	rm -f tests/test_device_discovery tests/test_connection tests/test_tcpx tests/test_performance
+	rm -f tests/test_tcpx_transfer tests/test_build_simple tests/test_build_simple_cuda
+	rm -f tests/test_rx_cmsg_parser tests/test_rx_descriptor tests/test_device_unpack tests/test_tcpx_integration
+	rm -f tests/benchmark_tcpx_unpack
+	@echo "Removing object files..."
+	rm -f $(RX_OBJS) $(DEVICE_OBJS) *.o
+	@echo "Clean completed. Source files preserved."
 
 .PHONY: all core quick check clean test_build_simple test_tcpx_transfer test_device_discovery test_connection test_tcpx test_performance
