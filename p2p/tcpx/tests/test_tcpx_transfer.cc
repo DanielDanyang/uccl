@@ -468,7 +468,7 @@ int main(int argc, char** argv) {
 
             // Create dedicated stream to avoid default stream blocking
             cudaStream_t dedicated_stream;
-            if (!cuda_check(cudaStreamCreate(&dedicated_stream), "cudaStreamCreate")) {
+            if (cudaStreamCreate(&dedicated_stream) != cudaSuccess) {
               std::cout << "[Debug Kernel] ERROR: Failed to create dedicated stream" << std::endl;
               device_copy_ok = false;
             } else {

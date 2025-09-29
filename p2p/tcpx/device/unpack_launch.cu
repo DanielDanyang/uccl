@@ -6,11 +6,14 @@
 #include "unpack_launch.h"
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 
 // Forward declare CUDA kernels
 extern "C" {
 __global__ void tcpxUnpackKernel(const tcpx::rx::UnpackDescriptorBlock* desc_block);
 __global__ void tcpxUnpackKernelSmall(const tcpx::rx::UnpackDescriptorBlock* desc_block);
+__global__ void tcpxUnpackKernelProbeByte(const tcpx::rx::UnpackDescriptorBlock* desc_block);
 }
 
 // Forward declare utility function from unpack_kernels.cu
