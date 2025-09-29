@@ -58,7 +58,7 @@ TEST(BuilderCreation) {
     const auto& stats = builder.getStats();
     ASSERT_EQ(stats.blocks_built, 0);
     ASSERT_EQ(stats.descriptors_created, 0);
-    ASSERT_EQ(stats.descriptors_merged, 0);
+    ASSERT_EQ(stats.bytes_processed, 0);
 }
 
 // Test empty scatter list
@@ -90,11 +90,12 @@ TEST(SingleDescriptor) {
     // Create scatter list with one entry
     ScatterList scatter_list;
     ScatterEntry entry;
-    entry.src_off = 0;
-    entry.dst_off = 0;
-    entry.len = 1024;
-    entry.is_dmabuf = false;
-    
+    entry.src_ptr = nullptr;
+    entry.src_offset = 0;
+    entry.dst_offset = 0;
+    entry.length = 1024;
+    entry.is_devmem = false;
+
     scatter_list.entries.push_back(entry);
     scatter_list.total_bytes = 1024;
     
@@ -121,17 +122,19 @@ TEST(MultipleDescriptors) {
     ScatterList scatter_list;
     
     ScatterEntry entry1;
-    entry1.src_off = 0;
-    entry1.dst_off = 0;
-    entry1.len = 512;
-    entry1.is_dmabuf = false;
-    
+    entry1.src_ptr = nullptr;
+    entry1.src_offset = 0;
+    entry1.dst_offset = 0;
+    entry1.length = 512;
+    entry1.is_devmem = false;
+
     ScatterEntry entry2;
-    entry2.src_off = 512;
-    entry2.dst_off = 512;
-    entry2.len = 512;
-    entry2.is_dmabuf = false;
-    
+    entry2.src_ptr = nullptr;
+    entry2.src_offset = 512;
+    entry2.dst_offset = 512;
+    entry2.length = 512;
+    entry2.is_devmem = false;
+
     scatter_list.entries.push_back(entry1);
     scatter_list.entries.push_back(entry2);
     scatter_list.total_bytes = 1024;
@@ -163,17 +166,19 @@ TEST(DescriptorMerging) {
     ScatterList scatter_list;
     
     ScatterEntry entry1;
-    entry1.src_off = 0;
-    entry1.dst_off = 0;
-    entry1.len = 256;
-    entry1.is_dmabuf = false;
-    
+    entry1.src_ptr = nullptr;
+    entry1.src_offset = 0;
+    entry1.dst_offset = 0;
+    entry1.length = 256;
+    entry1.is_devmem = false;
+
     ScatterEntry entry2;
-    entry2.src_off = 256;  // Adjacent
-    entry2.dst_off = 256;  // Adjacent
-    entry2.len = 256;
-    entry2.is_dmabuf = false;
-    
+    entry2.src_ptr = nullptr;
+    entry2.src_offset = 256;  // Adjacent
+    entry2.dst_offset = 256;  // Adjacent
+    entry2.length = 256;
+    entry2.is_devmem = false;
+
     scatter_list.entries.push_back(entry1);
     scatter_list.entries.push_back(entry2);
     scatter_list.total_bytes = 512;
@@ -197,14 +202,15 @@ TEST(Statistics) {
     
     ScatterList scatter_list;
     ScatterEntry entry;
-    entry.src_off = 0;
-    entry.dst_off = 0;
-    entry.len = 1024;
-    entry.is_dmabuf = false;
-    
+    entry.src_ptr = nullptr;
+    entry.src_offset = 0;
+    entry.dst_offset = 0;
+    entry.length = 1024;
+    entry.is_devmem = false;
+
     scatter_list.entries.push_back(entry);
     scatter_list.total_bytes = 1024;
-    
+
     UnpackDescriptorBlock desc_block;
     builder.buildDescriptors(scatter_list, desc_block);
     

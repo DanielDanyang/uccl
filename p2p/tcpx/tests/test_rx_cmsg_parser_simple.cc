@@ -59,8 +59,8 @@ TEST(ParserCreation) {
     
     const auto& stats = parser.getStats();
     ASSERT_EQ(stats.total_messages, 0);
-    ASSERT_EQ(stats.dmabuf_messages, 0);
-    ASSERT_EQ(stats.linear_messages, 0);
+    ASSERT_EQ(stats.devmem_fragments, 0);
+    ASSERT_EQ(stats.linear_fragments, 0);
 }
 
 // Test empty message parsing
@@ -127,21 +127,23 @@ TEST(ScatterListValidation) {
     
     // Add some test entries
     ScatterEntry entry1;
-    entry1.src_off = 0;
-    entry1.dst_off = 0;
-    entry1.len = 100;
-    entry1.is_dmabuf = false;
-    
+    entry1.src_ptr = nullptr;
+    entry1.src_offset = 0;
+    entry1.dst_offset = 0;
+    entry1.length = 100;
+    entry1.is_devmem = false;
+
     ScatterEntry entry2;
-    entry2.src_off = 100;
-    entry2.dst_off = 100;
-    entry2.len = 200;
-    entry2.is_dmabuf = true;
-    
+    entry2.src_ptr = nullptr;
+    entry2.src_offset = 100;
+    entry2.dst_offset = 100;
+    entry2.length = 200;
+    entry2.is_devmem = true;
+
     scatter_list.entries.push_back(entry1);
     scatter_list.entries.push_back(entry2);
     scatter_list.total_bytes = 300;
-    
+
     // Test validation (this is internal function, just test it doesn't crash)
     ASSERT_EQ(scatter_list.entries.size(), 2);
     ASSERT_EQ(scatter_list.total_bytes, 300);
