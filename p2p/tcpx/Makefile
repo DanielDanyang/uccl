@@ -13,7 +13,7 @@ CUDA_LIBS  := -L$(CUDA_HOME)/lib64 -lcuda -lcudart
 
 # Source files
 RX_SRCS    := rx/rx_cmsg_parser.cc rx/rx_descriptor.cc
-DEVICE_SRCS := device/unpack_kernels.cu device/unpack_launch.cc
+DEVICE_SRCS := device/unpack_kernels.cu device/unpack_launch.cu
 UNPACK_SRCS := $(RX_SRCS) $(DEVICE_SRCS)
 
 # Object files
@@ -27,7 +27,7 @@ DEVICE_OBJS := device/unpack_kernels.o device/unpack_launch.o
 device/unpack_kernels.o: device/unpack_kernels.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
-device/unpack_launch.o: device/unpack_launch.cc
+device/unpack_launch.o: device/unpack_launch.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 # Original tests (legacy)
