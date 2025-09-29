@@ -1,5 +1,7 @@
 # TCPX Device-to-Device Transfer Flow
 
+注：当前测试默认启用 Host 接收回退（环境变量 `UCCL_TCPX_HOST_RECV_DEBUG=1` 由测试程序内部设置）。这能在未接入设备端 unpack 流水线时稳定验证端到端传输。若要尝试纯 GPU→GPU 路径，请显式设置 `UCCL_TCPX_HOST_RECV_DEBUG=0` 并确保设备端 unpack 已对接。
+
 这份文档对应 `tests/test_tcpx_transfer.cc`，帮助在两节点环境中验证 GPUDirect TCPX 的 GPU 端到端数据通路。
 
 ## ASCII 流程图

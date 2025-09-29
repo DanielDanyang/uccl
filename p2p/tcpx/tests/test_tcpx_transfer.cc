@@ -136,6 +136,12 @@ int main(int argc, char** argv) {
   setenv("NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE", "4096", 0);  // Plugin-specific backup
   // Optional: make receive path more deterministic during debug
   setenv("NCCL_GPUDIRECTTCPX_RECV_SYNC", "1", 0);
+  // IMPORTANT: until device-side unpack pipeline is fully integrated with the
+  // TCPX receive path, default the server to receive into a page-aligned host
+  // buffer and verify payload there. This avoids the known issue where the
+  // transport does not place bytes directly into the user GPU buffer without
+  // a follow-up unpack. Users can override by exporting UCCL_TCPX_HOST_RECV_DEBUG=0.
+  setenv("UCCL_TCPX_HOST_RECV_DEBUG", "1", 0);
 
   std::cout << "[DEBUG] === TCPX GPU-to-GPU transfer test ===" << std::endl;
   if (argc < 2) {
