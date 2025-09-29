@@ -7,9 +7,48 @@
 #define TCPX_RX_CMSG_PARSER_H_
 
 #include <stdint.h>
-#include <sys/socket.h>
 #include <vector>
 #include <memory>
+
+#ifdef _WIN32
+// Windows socket headers
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// Define Linux socket structures for compatibility
+struct msghdr {
+    void* msg_name;
+    socklen_t msg_namelen;
+    struct iovec* msg_iov;
+    size_t msg_iovlen;
+    void* msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+};
+
+struct cmsghdr {
+    size_t cmsg_len;
+    int cmsg_level;
+    int cmsg_type;
+};
+
+struct iovec {
+    void* iov_base;
+    size_t iov_len;
+};
+
+#ifndef SOL_SOCKET
+#define SOL_SOCKET 1
+#endif
+#define CMSG_FIRSTHDR(msg) ((msg)->msg_controllen >= sizeof(struct cmsghdr) ? (struct cmsghdr*)(msg)->msg_control : nullptr)
+#define CMSG_NXTHDR(msg, cmsg) nullptr  // Simplified for Windows
+#define CMSG_DATA(cmsg) ((unsigned char*)(cmsg) + sizeof(struct cmsghdr))
+#define CMSG_LEN(len) (sizeof(struct cmsghdr) + (len))
+#define CMSG_SPACE(len) (sizeof(struct cmsghdr) + (len))
+
+#else
+// Linux socket headers
+#include <sys/socket.h>
+#endif
 
 namespace tcpx {
 namespace rx {

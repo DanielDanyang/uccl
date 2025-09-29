@@ -7,8 +7,15 @@
 #define TCPX_RX_DESCRIPTOR_H_
 
 #include <stdint.h>
-#include <cuda_runtime.h>
+#include <vector>
 #include "rx_cmsg_parser.h"
+
+#ifdef __CUDACC__
+#include <cuda_runtime.h>
+#else
+// Dummy CUDA types for non-CUDA builds
+typedef void* cudaStream_t;
+#endif
 
 namespace tcpx {
 namespace rx {

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
 
 namespace tcpx {
 namespace rx {
@@ -24,9 +25,11 @@ int CmsgParser::parse(const struct msghdr* msg, ScatterList& scatter_list) {
   uint32_t current_dst_offset = 0;
   
   // Iterate through all control messages
-  for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(msg); 
-       cmsg != nullptr; 
-       cmsg = CMSG_NXTHDR(msg, cmsg)) {
+  // Cast away const for CMSG_NXTHDR compatibility
+  struct msghdr* mutable_msg = const_cast<struct msghdr*>(msg);
+  for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(mutable_msg);
+       cmsg != nullptr;
+       cmsg = CMSG_NXTHDR(mutable_msg, cmsg)) {
     
     if (cmsg->cmsg_level != SOL_SOCKET) continue;
     

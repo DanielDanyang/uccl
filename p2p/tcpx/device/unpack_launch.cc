@@ -14,10 +14,8 @@ __global__ void tcpxUnpackKernelSmall(const tcpx::rx::UnpackDescriptorBlock* des
 }
 
 // Forward declare utility function from unpack_kernels.cu
-namespace tcpx {
-namespace device {
+extern "C" {
 KernelLaunchParams calculateLaunchParams(const tcpx::rx::UnpackDescriptorBlock& desc_block);
-}
 }
 
 namespace tcpx {
@@ -175,8 +173,8 @@ int UnpackLauncher::copyDescriptorBlockToDevice(
 
 KernelLaunchParams UnpackLauncher::calculateLaunchParams(
     const tcpx::rx::UnpackDescriptorBlock& desc_block) const {
-  
-  return ::tcpx::device::calculateLaunchParams(desc_block);
+
+  return ::calculateLaunchParams(desc_block);
 }
 
 int UnpackLauncher::launchKernel(const KernelLaunchParams& params) {

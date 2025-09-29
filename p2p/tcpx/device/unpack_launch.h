@@ -12,8 +12,14 @@
 namespace tcpx {
 namespace device {
 
-// Forward declarations
-struct KernelLaunchParams;
+// Kernel launch parameters structure
+struct KernelLaunchParams {
+  dim3 grid_size;
+  dim3 block_size;
+  size_t shared_mem_size;
+
+  KernelLaunchParams() : shared_mem_size(0) {}
+};
 
 // Unpack launcher configuration
 struct UnpackLaunchConfig {

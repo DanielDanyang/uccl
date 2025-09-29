@@ -166,8 +166,8 @@ extern "C" __global__ void tcpxUnpackKernel(
   
   int tid = threadIdx.x;
   int bid = blockIdx.x;
-  int warp_id = tid / WARP_SIZE;
-  int lane_id = tid % WARP_SIZE;
+  // int warp_id = tid / WARP_SIZE;  // Unused in this kernel
+  // int lane_id = tid % WARP_SIZE;  // Unused in this kernel
   
   char* bounce_buffer = static_cast<char*>(desc_block->bounce_buffer);
   char* dst_buffer = static_cast<char*>(desc_block->dst_buffer);
@@ -197,17 +197,10 @@ extern "C" __global__ void tcpxUnpackKernelSmall(
   }
 }
 
-// Kernel launch parameters calculation
-struct KernelLaunchParams {
-  dim3 grid_size;
-  dim3 block_size;
-  size_t shared_mem_size;
-  
-  KernelLaunchParams() : shared_mem_size(0) {}
-};
+// Kernel launch parameters calculation (use header definition)
 
 // Calculate optimal launch parameters
-__host__ KernelLaunchParams calculateLaunchParams(
+extern "C" __host__ KernelLaunchParams calculateLaunchParams(
     const tcpx::rx::UnpackDescriptorBlock& desc_block) {
   
   KernelLaunchParams params;
