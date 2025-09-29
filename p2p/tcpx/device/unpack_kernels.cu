@@ -97,23 +97,36 @@ void st_global<16>(uintptr_t addr, BytePack<16> val) {
 #define DATA_LOAD_SIZE 16
 #define WARP_SIZE 32
 
+// Device-side visibility barrier similar to NCCL load64gpu on cnt
+__device__ __forceinline__ void devmem_visibility_barrier(const void* flag_ptr) {
+  if (!flag_ptr) return;
+#if __CUDA_ARCH__ >= 700
+  unsigned long long v;
+  asm volatile("ld.relaxed.gpu.u64 {%0}, [%1];" : "=l"(v) : "l"(flag_ptr) : "memory");
+#else
+  volatile unsigned long long* p = (volatile unsigned long long*)flag_ptr;
+  (void)*p;
+#endif
+  __syncthreads();
+}
+
 // Bulk copy template (adapted from NCCL)
 template<int BYTES>
 __device__ void bulkCopy(int tid, uint32_t len, char* src, char* dst) {
   const int elements_per_thread = DATA_LOAD_SIZE / BYTES;
   BytePack<BYTES> reg[elements_per_thread];
-  
-  for (uint32_t offset = tid * DATA_LOAD_SIZE; 
-       offset + DATA_LOAD_SIZE <= len; 
+
+  for (uint32_t offset = tid * DATA_LOAD_SIZE;
+       offset + DATA_LOAD_SIZE <= len;
        offset += WARP_SIZE * DATA_LOAD_SIZE) {
-    
+
     // Load data
     #pragma unroll
     for (int i = 0; i < elements_per_thread; ++i) {
       reg[i] = ld_volatile_global<BYTES>(
         reinterpret_cast<uintptr_t>(src + offset) + i * BYTES);
     }
-    
+
     // Store data
     #pragma unroll
     for (int i = 0; i < elements_per_thread; ++i) {
@@ -164,15 +177,17 @@ __device__ void unpackSingleDescriptor(
 // Main unpack kernel
 extern "C" __global__ void tcpxUnpackKernel(
     const tcpx::rx::UnpackDescriptorBlock* desc_block) {
-  
+
   int tid = threadIdx.x;
   int bid = blockIdx.x;
-  // int warp_id = tid / WARP_SIZE;  // Unused in this kernel
-  // int lane_id = tid % WARP_SIZE;  // Unused in this kernel
-  
+
+  // Issue a device-side visibility barrier before reading bounce buffer
+  if (tid == 0) devmem_visibility_barrier(desc_block->ready_flag);
+  __syncthreads();
+
   char* bounce_buffer = static_cast<char*>(desc_block->bounce_buffer);
   char* dst_buffer = static_cast<char*>(desc_block->dst_buffer);
-  
+
   // Each block processes one descriptor
   if (bid < desc_block->count) {
     const tcpx::rx::UnpackDescriptor& desc = desc_block->descriptors[bid];
@@ -183,14 +198,18 @@ extern "C" __global__ void tcpxUnpackKernel(
 // Optimized kernel for small descriptors (single warp per descriptor)
 extern "C" __global__ void tcpxUnpackKernelSmall(
     const tcpx::rx::UnpackDescriptorBlock* desc_block) {
-  
+
   int tid = threadIdx.x + blockIdx.x * blockDim.x;
   int warp_id = tid / WARP_SIZE;
   int lane_id = tid % WARP_SIZE;
-  
+
+  // Issue a device-side visibility barrier before reading bounce buffer
+  if (threadIdx.x == 0) devmem_visibility_barrier(desc_block->ready_flag);
+  __syncthreads();
+
   char* bounce_buffer = static_cast<char*>(desc_block->bounce_buffer);
   char* dst_buffer = static_cast<char*>(desc_block->dst_buffer);
-  
+
   // Each warp processes one descriptor
   if (warp_id < desc_block->count) {
     const tcpx::rx::UnpackDescriptor& desc = desc_block->descriptors[warp_id];

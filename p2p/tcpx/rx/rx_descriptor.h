@@ -42,9 +42,14 @@ struct UnpackDescriptorBlock {
   uint32_t total_bytes;     // Total bytes to unpack
   void* bounce_buffer;      // Source bounce buffer base
   void* dst_buffer;         // Destination buffer base
-  
-  UnpackDescriptorBlock() 
-    : count(0), total_bytes(0), bounce_buffer(nullptr), dst_buffer(nullptr) {}
+  // Optional device-side readiness flag (e.g., pointer to cnt in meta ring)
+  // If non-null, kernels will issue a device load from this address before copying
+  void* ready_flag;         // Device pointer to a 64-bit counter/flag (optional)
+  uint64_t ready_threshold; // Optional: expected minimal value to consider ready
+
+  UnpackDescriptorBlock()
+    : count(0), total_bytes(0), bounce_buffer(nullptr), dst_buffer(nullptr)
+    , ready_flag(nullptr), ready_threshold(0) {}
 };
 
 // Descriptor builder configuration

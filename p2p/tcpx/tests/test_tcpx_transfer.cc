@@ -422,6 +422,11 @@ int main(int argc, char** argv) {
           desc_block.total_bytes = 0;
           desc_block.bounce_buffer = dev_handle.bounce_buf;
           desc_block.dst_buffer = reinterpret_cast<void*>(d_aligned);
+
+	          // Provide device-side ready flag to mimic NCCL visibility barrier
+	          desc_block.ready_flag = rx_req->unpack_slot.cnt;  // device pointer
+	          desc_block.ready_threshold = frag_count;  // optional, not enforced yet
+
           for (uint32_t i = 0; i < desc_block.count; ++i) {
             desc_block.descriptors[i].src_off = meta_entries[i].src_off;
             desc_block.descriptors[i].len = meta_entries[i].len;
@@ -431,15 +436,92 @@ int main(int argc, char** argv) {
                       << " len=" << meta_entries[i].len
                       << " dst_off=" << meta_entries[i].dst_off << std::endl;
           }
-          tcpx::device::UnpackLaunchConfig unpack_cfg;
-          tcpx::device::UnpackLauncher unpack_launcher(unpack_cfg);
-          std::cout << "[DEBUG] Launching device unpack, total_bytes="
-                    << desc_block.total_bytes << std::endl;
-          if (unpack_launcher.launchSync(desc_block) != 0) {
-            std::cout << "[DEBUG] ERROR: device unpack kernel launch failed" << std::endl;
-          } else if (!cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes),
-                                      "cuMemcpyDtoH(dst)")) {
+          bool device_copy_ok = true;
+
+          // Optional preflight: sanity-check that bounce buffer is readable from this context
+          if (desc_block.count > 0) {
+            const auto& meta0 = desc_block.descriptors[0];
+            CUdeviceptr src0 = static_cast<CUdeviceptr>(
+                reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta0.src_off);
+            unsigned char probe[32] = {0};
+            size_t probe_n = std::min<size_t>(sizeof(probe), meta0.len);
+            if (!cuda_check(cuMemcpyDtoH(probe, src0, probe_n), "cuMemcpyDtoH(bounce_probe)")) {
+              std::cout << "[DEBUG] ERROR: bounce buffer not readable from current context" << std::endl;
+            } else {
+              std::cout << "[DEBUG] Bounce probe (" << probe_n << "B) from src_off=" << meta0.src_off << ": ";
+              for (size_t i = 0; i < probe_n; ++i) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0')
+                          << static_cast<int>(probe[i]) << ' ';
+              }
+              std::cout << std::dec << std::endl;
+            }
+          }
+
+          // Select unpack implementation: kernel | d2d | host
+          const char* impl_env = std::getenv("UCCL_TCPX_UNPACK_IMPL");
+          std::string impl = impl_env ? std::string(impl_env) : std::string("d2d");
+          std::transform(impl.begin(), impl.end(), impl.begin(), ::tolower);
+
+          if (impl == "kernel") {
+            std::cout << "[DEBUG] Launching device unpack (kernel), total_bytes="
+                      << desc_block.total_bytes << std::endl;
+            tcpx::device::UnpackLaunchConfig cfg;
+            cfg.stream = nullptr;               // use default stream to avoid stream mismatches
+            cfg.enable_profiling = false;       // avoid event sync during debugging
+            cfg.use_small_kernel = true;        // small payloads
+            tcpx::device::UnpackLauncher launcher(cfg);
+            int lrc = launcher.launchSync(desc_block);
+            if (lrc != 0) {
+              std::cout << "[DEBUG] ERROR: Unpack kernel failed rc=" << lrc << std::endl;
+              device_copy_ok = false;
+            } else {
+              std::cout << "[DEBUG] Unpack kernel completed" << std::endl;
+            }
+          } else if (impl == "host") {
+            std::cout << "[DEBUG] Launching host gather (DtoH+memcpy+HtoD), total_bytes="
+                      << desc_block.total_bytes << std::endl;
+            // Slow but robust path for debugging
+            std::vector<unsigned char> tmp(desc_block.total_bytes);
+            size_t off = 0;
+            for (uint32_t i = 0; i < desc_block.count; ++i) {
+              const auto& meta = desc_block.descriptors[i];
+              CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
+                  reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
+              if (!cuda_check(cuMemcpyDtoH(tmp.data() + off, src_ptr, meta.len), "cuMemcpyDtoH(fragment)")) {
+                device_copy_ok = false;
+                break;
+              }
+              off += meta.len;
+            }
+            if (device_copy_ok) {
+              if (!cuda_check(cuMemcpyHtoD(static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(desc_block.dst_buffer)),
+                                            tmp.data(), tmp.size()), "cuMemcpyHtoD(dst)")) {
+                device_copy_ok = false;
+              }
+            }
+          } else {
+            std::cout << "[DEBUG] Launching device unpack (D2D copies), total_bytes="
+                      << desc_block.total_bytes << std::endl;
+            // Default: D2D copy per fragment (current fallback)
+            for (uint32_t i = 0; i < desc_block.count; ++i) {
+              const auto& meta = desc_block.descriptors[i];
+              CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
+                  reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
+              CUdeviceptr dst_ptr = static_cast<CUdeviceptr>(
+                  reinterpret_cast<uintptr_t>(desc_block.dst_buffer) + meta.dst_off);
+              if (!cuda_check(cuMemcpyDtoD(dst_ptr, src_ptr, meta.len), "cuMemcpyDtoD(fragment)")) {
+                device_copy_ok = false;
+                break;
+              }
+            }
+          }
+
+          // Post-copy verification: bring dst buffer back to host
+          if (!device_copy_ok) {
+            std::cout << "[DEBUG] ERROR: device copy failed" << std::endl;
+          } else if (!cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes), "cuMemcpyDtoH(dst)")) {
             std::cout << "[DEBUG] ERROR: failed to copy unpacked payload to host" << std::endl;
+            device_copy_ok = false;
           } else {
             copy_ok = true;
             bytes_copied = desc_block.total_bytes;
@@ -640,5 +722,6 @@ int main(int argc, char** argv) {
     return done ? 0 : 1;
   }
 }
+
 
 
