@@ -63,7 +63,7 @@ TEST(LauncherCreation) {
     
     const auto& stats = launcher.getStats();
     ASSERT_EQ(stats.launches, 0);
-    ASSERT_EQ(stats.total_bytes, 0);
+    ASSERT_EQ(stats.bytes_unpacked, 0);
 }
 
 // Test empty descriptor block

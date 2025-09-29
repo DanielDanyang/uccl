@@ -87,14 +87,14 @@ TEST(SingleDescriptor) {
     
     DescriptorBuilder builder(config);
     
-    // Create scatter list with one entry
+    // Create scatter list with one entry (must be devmem for GPU processing)
     ScatterList scatter_list;
     ScatterEntry entry;
     entry.src_ptr = nullptr;
     entry.src_offset = 0;
     entry.dst_offset = 0;
     entry.length = 1024;
-    entry.is_devmem = false;
+    entry.is_devmem = true;  // Changed to true for GPU processing
 
     scatter_list.entries.push_back(entry);
     scatter_list.total_bytes = 1024;
@@ -126,14 +126,14 @@ TEST(MultipleDescriptors) {
     entry1.src_offset = 0;
     entry1.dst_offset = 0;
     entry1.length = 512;
-    entry1.is_devmem = false;
+    entry1.is_devmem = true;  // Changed to true for GPU processing
 
     ScatterEntry entry2;
     entry2.src_ptr = nullptr;
     entry2.src_offset = 512;
     entry2.dst_offset = 512;
     entry2.length = 512;
-    entry2.is_devmem = false;
+    entry2.is_devmem = true;  // Changed to true for GPU processing
 
     scatter_list.entries.push_back(entry1);
     scatter_list.entries.push_back(entry2);
@@ -170,14 +170,14 @@ TEST(DescriptorMerging) {
     entry1.src_offset = 0;
     entry1.dst_offset = 0;
     entry1.length = 256;
-    entry1.is_devmem = false;
+    entry1.is_devmem = true;  // Changed to true for GPU processing
 
     ScatterEntry entry2;
     entry2.src_ptr = nullptr;
     entry2.src_offset = 256;  // Adjacent
     entry2.dst_offset = 256;  // Adjacent
     entry2.length = 256;
-    entry2.is_devmem = false;
+    entry2.is_devmem = true;  // Changed to true for GPU processing
 
     scatter_list.entries.push_back(entry1);
     scatter_list.entries.push_back(entry2);
@@ -206,7 +206,7 @@ TEST(Statistics) {
     entry.src_offset = 0;
     entry.dst_offset = 0;
     entry.length = 1024;
-    entry.is_devmem = false;
+    entry.is_devmem = true;  // Changed to true for GPU processing
 
     scatter_list.entries.push_back(entry);
     scatter_list.total_bytes = 1024;
