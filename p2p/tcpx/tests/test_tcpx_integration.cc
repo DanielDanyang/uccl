@@ -75,7 +75,6 @@ protected:
     parser_config.bounce_size = BUFFER_SIZE;
     parser_config.dmabuf_base = h_dmabuf_buffer_;
     parser_config.dmabuf_size = BUFFER_SIZE;
-    parser_config.expected_dmabuf_id = TEST_DMABUF_ID;
     
     parser_ = std::make_unique<CmsgParser>(parser_config);
   }
@@ -143,7 +142,7 @@ protected:
         data->frag_offset = frag.offset;
         data->frag_size = frag.size;
         data->frag_token = frag.token;
-        data->dmabuf_id = TEST_DMABUF_ID;
+        data->dmabuf_id = 0;
         
         ptr += CMSG_SPACE(sizeof(DevMemFragment));
       } else {
@@ -232,7 +231,6 @@ protected:
   };
   
   static constexpr size_t BUFFER_SIZE = 32 * 1024;
-  static constexpr uint32_t TEST_DMABUF_ID = 42;
   
   char* h_bounce_buffer_;
   char* h_dmabuf_buffer_;
@@ -390,27 +388,28 @@ TEST_F(TcpxIntegrationTest, StressTest) {
 }
 
 TEST_F(TcpxIntegrationTest, ErrorRecovery) {
-  // Test with invalid dmabuf ID (should fail at parser stage)
+  // Test with missing dmabuf backing (should fail at parser stage)
   std::vector<MockFragment> fragments = {
     {0, 1024, 12345, true}
   };
   
-  // Temporarily change expected dmabuf ID
-  ParserConfig config;
-  config.bounce_buffer = h_bounce_buffer_;
-  config.bounce_size = BUFFER_SIZE;
-  config.dmabuf_base = h_dmabuf_buffer_;
-  config.dmabuf_size = BUFFER_SIZE;
-  config.expected_dmabuf_id = 999;  // Wrong ID
+  ParserConfig bad_config;
+  bad_config.bounce_buffer = h_bounce_buffer_;
+  bad_config.bounce_size = BUFFER_SIZE;
+  bad_config.dmabuf_base = nullptr;
+  bad_config.dmabuf_size = 0;
   
-  parser_->updateConfig(config);
+  parser_->updateConfig(bad_config);
   
   int ret = runPipeline(fragments);
   EXPECT_LT(ret, 0);  // Should fail
   
-  // Restore correct config
-  config.expected_dmabuf_id = TEST_DMABUF_ID;
-  parser_->updateConfig(config);
+  ParserConfig good_config;
+  good_config.bounce_buffer = h_bounce_buffer_;
+  good_config.bounce_size = BUFFER_SIZE;
+  good_config.dmabuf_base = h_dmabuf_buffer_;
+  good_config.dmabuf_size = BUFFER_SIZE;
+  parser_->updateConfig(good_config);
   
   ret = runPipeline(fragments);
   EXPECT_EQ(ret, 0);  // Should succeed now
@@ -429,3 +428,6 @@ int main(int argc, char** argv) {
   
   return RUN_ALL_TESTS();
 }
+
+
+

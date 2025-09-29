@@ -18,7 +18,6 @@ protected:
     config_.bounce_size = sizeof(bounce_buffer_);
     config_.dmabuf_base = dmabuf_buffer_;
     config_.dmabuf_size = sizeof(dmabuf_buffer_);
-    config_.expected_dmabuf_id = TEST_DMABUF_ID;
     
     parser_ = std::make_unique<CmsgParser>(config_);
     
@@ -70,7 +69,6 @@ protected:
     const void* data;
   };
   
-  static constexpr uint32_t TEST_DMABUF_ID = 42;
   static constexpr size_t BUFFER_SIZE = 4096;
   
   ParserConfig config_;
@@ -99,7 +97,7 @@ TEST_F(RxCmsgParserTest, SingleDevMemFragment) {
     .frag_offset = 100,
     .frag_size = 256,
     .frag_token = 12345,
-    .dmabuf_id = TEST_DMABUF_ID
+    .dmabuf_id = 0
   };
   
   std::vector<MockCmsg> cmsgs = {
@@ -158,8 +156,7 @@ TEST_F(RxCmsgParserTest, MixedFragments) {
     .frag_offset = 0,
     .frag_size = 512,
     .frag_token = 11111,
-    .dmabuf_id = TEST_DMABUF_ID
-  };
+    };
   
   uint32_t linear_size = 256;
   
@@ -192,25 +189,34 @@ TEST_F(RxCmsgParserTest, MixedFragments) {
   EXPECT_EQ(linear_entry.length, 256);
 }
 
-TEST_F(RxCmsgParserTest, InvalidDmabufId) {
+TEST_F(RxCmsgParserTest, MissingDmabufBase) {
+  ParserConfig cfg;
+  cfg.bounce_buffer = bounce_buffer_;
+  cfg.bounce_size = sizeof(bounce_buffer_);
+  cfg.dmabuf_base = nullptr;
+  cfg.dmabuf_size = 0;
+  parser_->updateConfig(cfg);
+
   DevMemFragment frag = {
     .frag_offset = 0,
     .frag_size = 256,
     .frag_token = 12345,
-    .dmabuf_id = 999  // Wrong dmabuf ID
+    .dmabuf_id = 0
   };
-  
+
   std::vector<MockCmsg> cmsgs = {
     {SCM_DEVMEM_DMABUF, sizeof(frag), &frag}
   };
-  
+
   struct msghdr msg = createMockMessage(cmsgs);
   ScatterList scatter_list;
-  
+
   int ret = parser_->parse(&msg, scatter_list);
-  
-  EXPECT_LT(ret, 0);  // Should fail
+
+  EXPECT_LT(ret, 0);  // Should fail due to missing dmabuf backing
   EXPECT_GT(parser_->getStats().validation_errors, 0);
+
+  parser_->updateConfig(config_);
 }
 
 TEST_F(RxCmsgParserTest, OutOfBoundsFragment) {
@@ -218,7 +224,7 @@ TEST_F(RxCmsgParserTest, OutOfBoundsFragment) {
     .frag_offset = BUFFER_SIZE - 100,  // Near end of buffer
     .frag_size = 256,                  // Extends beyond buffer
     .frag_token = 12345,
-    .dmabuf_id = TEST_DMABUF_ID
+    .dmabuf_id = 0
   };
   
   std::vector<MockCmsg> cmsgs = {
@@ -239,7 +245,7 @@ TEST_F(RxCmsgParserTest, ValidationSuccess) {
     .frag_offset = 0,
     .frag_size = 256,
     .frag_token = 12345,
-    .dmabuf_id = TEST_DMABUF_ID
+    .dmabuf_id = 0
   };
   
   std::vector<MockCmsg> cmsgs = {
@@ -261,7 +267,7 @@ TEST_F(RxCmsgParserTest, ValidationSizeMismatch) {
     .frag_offset = 0,
     .frag_size = 256,
     .frag_token = 12345,
-    .dmabuf_id = TEST_DMABUF_ID
+    .dmabuf_id = 0
   };
   
   std::vector<MockCmsg> cmsgs = {
@@ -283,7 +289,7 @@ TEST_F(RxCmsgParserTest, UtilityFunctions) {
     .frag_offset = 100,
     .frag_size = 256,
     .frag_token = 12345,
-    .dmabuf_id = TEST_DMABUF_ID
+    .dmabuf_id = 0
   };
   
   std::vector<MockCmsg> cmsgs = {
@@ -315,7 +321,7 @@ TEST_F(RxCmsgParserTest, PerformanceTest) {
     .frag_offset = 0,
     .frag_size = 1024,
     .frag_token = 12345,
-    .dmabuf_id = TEST_DMABUF_ID
+    .dmabuf_id = 0
   };
   
   std::vector<MockCmsg> cmsgs = {
@@ -346,3 +352,4 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+

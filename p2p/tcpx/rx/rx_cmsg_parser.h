@@ -73,6 +73,11 @@ struct ScatterEntry {
   uint32_t length;        // Data length
   bool is_devmem;         // True if from dmabuf, false if from linear buffer
   uint32_t token;         // Token for devmem fragments (for freeing)
+  uint32_t token_count;   // Number of contiguous tokens represented
+
+  ScatterEntry()
+      : src_ptr(nullptr), src_offset(0), dst_offset(0), length(0),
+        is_devmem(false), token(0), token_count(0) {}
 };
 
 // Parsed scatter-gather list
@@ -146,7 +151,7 @@ private:
                 uint32_t& current_dst_offset);
   
   // Validate fragment bounds
-  bool validateFragment(const DevMemFragment& frag) const;
+  bool validateFragment(uint32_t offset, uint32_t length) const;
   bool validateLinearFragment(uint32_t size, uint32_t offset) const;
   
   ParserConfig config_;
@@ -173,3 +178,7 @@ std::string dumpScatterList(const ScatterList& scatter_list);
 } // namespace tcpx
 
 #endif // TCPX_RX_CMSG_PARSER_H_
+
+
+
+

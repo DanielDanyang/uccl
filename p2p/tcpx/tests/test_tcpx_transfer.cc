@@ -8,16 +8,17 @@
  *
  * Server steps:
  *   1. Listen for TCPX connections on device 0, publish NCCL handle via bootstrap TCP socket.
- *   2. Accept TCPX connection, register 4KB CUDA buffer, submit async receive request.
- *   3. Poll for completion, copy data back to host memory and validate payload content.
+ *   2. Accept TCPX connection, register a 4KB CUDA buffer, submit an async receive request.
+ *   3. Poll for completion, execute the device unpack path, copy data back to host memory, and validate.
  *
  * Client steps:
- *   1. Get NCCL handle via bootstrap TCP socket.
- *   2. Connect to server via TCPX, register 4KB CUDA buffer, write test payload and send.
- *   3. Wait for completion and cleanup resources.
+ *   1. Get the NCCL handle via bootstrap TCP socket.
+ *   2. Connect to the server via TCPX, register a 4KB CUDA buffer, write the test payload, and send.
+ *   3. Wait for completion and clean up resources.
  */
 
 #include "../tcpx_interface.h"
+#include "../include/tcpx_structs.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -48,76 +49,29 @@ struct ncclNetHandle_v7 {
 };
 
 constexpr int kBootstrapPort = 12345;
-constexpr size_t kRegisteredBytes = 4096;      // 4 KB aligned allocation.
-
-// PROBLEM BACKGROUND MARKER:
-// Previously using sizeof(kTestMessage) directly as payload size would include trailing '\0',
-// causing client to think 25B while logs/transport layer only handled 24B visible chars,
-// creating 25 vs 24B inconsistency, further triggering small packet zero-copy (MSG_ZEROCOPY)
-// kernel errqueue flakiness, server only seeing 16B control message, no payload received.
-// Fix: Use strlen semantics (sizeof-1), force <4KB to copy path at runtime to avoid small packet zero-copy.
+constexpr size_t kRegisteredBytes = 4096;  // 4 KB aligned allocation.
 
 constexpr char kTestMessage[] = "Hello from TCPX client!";
-// Default payload length (visible chars only). Can be overridden by env
-// UCCL_TCPX_PAYLOAD_BYTES up to kRegisteredBytes.
 constexpr size_t kDefaultPayloadBytes = sizeof(kTestMessage) - 1;
-constexpr int kTransferTag = 42;  // Payload tag
-constexpr int kAcceptMaxRetries = 120;         // ~12 s (100 ms per retry).
+constexpr int kTransferTag = 42;
+constexpr int kAcceptMaxRetries = 120;  // ~12 s (100 ms per retry).
 
-// Minimal replicas of plugin-internal structures we need for device unpack.
-struct NcclNetDeviceHandle {
-  int netDeviceType;
-  int netDeviceVersion;
-  void* handle;
-  size_t size;
-  int needsProxyProgress;
-};
-
-struct DevmemToken {
-  uint32_t token_start;
-  uint32_t token_count;
-};
-
-struct TcpxUnpackSlot {
-  bool active;
-  uint64_t idx;
-  void* mem;               // Array of loadMeta entries
-  uint64_t* cnt;           // Number of valid entries written by transport
-  uint64_t cnt_cache;
-  size_t* fds_cnt;
-  size_t* pgtok_cnts;
-  int* fds;
-  DevmemToken* pgtoks;
-};
-
-struct TcpxRequest {
-  void* comm;
-  void* data;
-  int op;
-  int mem_type;
-  int next_sock_id;
-  int next_size;
-  int offset;
-  int size;
-  int size_pending;
-  int gpu_mem_fd;
-  int gpu_mem_off;
-  TcpxUnpackSlot unpack_slot;
-};
-
-struct UnpackNetDeviceHandle {
-  void* meta;
-  void* bounce_buf;
-  uint64_t head;
-};
-
-struct LoadMetaEntry {
-  uint32_t src_off;
-  uint32_t len;
-  uint64_t dst_off;
-};
+using NcclNetDeviceHandle = tcpx::plugin::NcclNetDeviceHandle;
+using DevmemToken = tcpx::plugin::DevmemToken;
+using TcpxUnpackSlot = tcpx::plugin::unpackSlot;
+using TcpxRequest = tcpx::plugin::tcpxRequest;
+using UnpackNetDeviceHandle = tcpx::plugin::unpackNetDeviceHandle;
+using LoadMetaEntry = tcpx::plugin::loadMeta;
 static_assert(sizeof(LoadMetaEntry) == 16, "loadMeta layout must match plugin");
 
+constexpr int kNetDeviceUnpackMaxQueueDepth = tcpx::plugin::kNetDeviceUnpackMaxQueueDepth;
+constexpr int kNetUnpackMaxSliceSize = tcpx::plugin::kNetUnpackMaxSliceSize;
+constexpr int kSlicePageSize = tcpx::plugin::kSlicePageSize;
+constexpr int kNetUnpackMaxSlicePages = tcpx::plugin::kNetUnpackMaxSlicePages;
+struct NetUnpackMeta {
+  LoadMetaEntry mem[kNetDeviceUnpackMaxQueueDepth][kNetUnpackMaxSlicePages];
+  uint64_t cnt[kNetDeviceUnpackMaxQueueDepth];
+};
 int create_bootstrap_server() {
   int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd < 0) return -1;
@@ -161,12 +115,12 @@ int connect_to_bootstrap_server(const char* server_ip) {
 }
 
 void dump_hex(const void* data, size_t bytes) {
-  const unsigned char* p = static_cast<const unsigned char*>(data);
+  const unsigned char* ptr = static_cast<const unsigned char*>(data);
   size_t limit = std::min<size_t>(bytes, 32);
   for (size_t i = 0; i < limit; ++i) {
-    if (i && i % 16 == 0) std::cout << "\n";
+    if (i && i % 16 == 0) std::cout << '\n';
     std::cout << std::hex << std::setw(2) << std::setfill('0')
-              << static_cast<int>(p[i]) << ' ';
+              << static_cast<int>(ptr[i]) << ' ';
   }
   std::cout << std::dec << std::endl;
 }
@@ -184,17 +138,15 @@ bool cuda_check(CUresult res, const char* what) {
             << std::endl;
   return false;
 }
-
 }  // namespace
 
 int main(int argc, char** argv) {
-  // Debug/stability knobs: avoid zero-copy for tiny payloads to reduce errqueue flakiness
+  // Debug/stability knobs: avoid zero-copy for tiny payloads to reduce errqueue flakiness.
   setenv("UCCL_TCPX_DEBUG", "1", 0);
-  setenv("NCCL_MIN_ZCOPY_SIZE", "4096", 0);  // Force <4KB to copy path
-  setenv("NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE", "4096", 0);  // Plugin-specific backup
-  // Optional: make receive path more deterministic during debug
+  setenv("NCCL_MIN_ZCOPY_SIZE", "4096", 0);
+  setenv("NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE", "4096", 0);
+  // Optional: make receive path more deterministic during debug.
   setenv("NCCL_GPUDIRECTTCPX_RECV_SYNC", "1", 0);
-  // Device-unpack path is the default. Set UCCL_TCPX_HOST_RECV_DEBUG=1 to force host fallback.
 
   std::cout << "[DEBUG] === TCPX GPU-to-GPU transfer test ===" << std::endl;
   if (argc < 2) {
@@ -209,7 +161,6 @@ int main(int argc, char** argv) {
   int dev_id = 0;
   bool is_server = std::strcmp(argv[1], "server") == 0;
 
-  // Resolve payload size (can be overridden via env UCCL_TCPX_PAYLOAD_BYTES)
   size_t payload_bytes = kDefaultPayloadBytes;
   if (const char* p = std::getenv("UCCL_TCPX_PAYLOAD_BYTES")) {
     char* endp = nullptr;
@@ -252,7 +203,6 @@ int main(int argc, char** argv) {
       }
       total_sent += static_cast<size_t>(sent);
     }
-    // Keep bootstrap_fd open to optionally send a 1-byte ACK after payload verification
 
     void* recv_comm = nullptr;
     alignas(16) unsigned char recv_dev_handle_storage[512] = {0};
@@ -262,168 +212,171 @@ int main(int argc, char** argv) {
     while (attempts < kAcceptMaxRetries) {
       int rc = tcpx_accept_v5(listen_comm, &recv_comm, &recv_dev_handle);
       if (rc != 0) {
-        std::cout << "[DEBUG] ERROR: tcpx_accept_v5 returned error rc=" << rc << std::endl;
+        std::cout << "[DEBUG] ERROR: tcpx_accept_v5 returned rc=" << rc << std::endl;
         tcpx_close_listen(listen_comm);
+        close(bootstrap_fd);
         return 1;
       }
-      if (recv_comm) break;  // Successfully established
+      if (recv_comm) break;
       ++attempts;
       if (attempts % 10 == 0) {
-        std::cout << "[DEBUG] INFO: tcpx_accept_v5 rc=0 but recv_comm still null (attempt "
-                  << attempts << "), continuing to wait for peer handshake..." << std::endl;
+        std::cout << "[DEBUG] INFO: waiting for peer handshake (attempt "
+                  << attempts << ")" << std::endl;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (!recv_comm) {
-      std::cout << "[DEBUG] ERROR: failed to get valid recv_comm after retries" << std::endl;
+      std::cout << "[DEBUG] ERROR: failed to obtain recv_comm after retries" << std::endl;
       tcpx_close_listen(listen_comm);
+      close(bootstrap_fd);
       return 1;
     }
     std::cout << "[DEBUG] Connection accepted; recv_comm=" << recv_comm << std::endl;
 
-    // ===== 【问题代码区�?：服务端GPU缓冲区分配与对齐�?=====
-    // 这里是TCPX传输问题的第一个关键环节：GPU内存分配�?KB对齐
-    // 历史问题：如果GPU内存没有正确对齐�?KB边界，tcpx_reg_mr会失�?    // 或者即使注册成功，GPUDirect TCPX的DMA传输也可能出现数据损�?    CUdevice cuDev = 0;
+    CUdevice cuDev = 0;
     CUcontext cuCtx = nullptr;
-    CUdeviceptr d_base = 0;      // 原始分配的GPU内存地址（可能未对齐�?    CUdeviceptr d_aligned = 0;   // 4KB对齐后的GPU内存地址（用于TCPX注册�?
-    // CUDA初始化和GPU内存分配
-    // Note: Allocate kRegisteredBytes + 4096 to ensure enough space for 4KB alignment
-    // because original address may not be on 4KB boundary, need to adjust up to nearest 4KB boundary
-    CUdevice cuDev;
-    CUcontext cuCtx;
     CUdeviceptr d_base = 0;
+    CUdeviceptr d_aligned = 0;
+    void* recv_buf = nullptr;
+    void* recv_mhandle = nullptr;
+    void* recv_request = nullptr;
+    bool use_host_recv = false;
+    bool request_posted = false;
+    bool request_consumed = false;
+    int done = 0;  // Changed from bool to int for tcpx_test
+    int received_size = 0;
+
+    auto cleanup_server = [&]() {
+      if (request_posted && recv_request && done && !request_consumed) {
+        int rc_consumed = tcpx_irecv_consumed(recv_comm, 1, recv_request);
+        std::cout << "[DEBUG] tcpx_irecv_consumed(rc=" << rc_consumed
+                  << ") request=" << recv_request << std::endl;
+        if (rc_consumed == 0) {
+          request_consumed = true;
+        }
+      } else if (request_posted && !done) {
+        std::cout << "[DEBUG] Skipping irecv_consumed because request not complete" << std::endl;
+      }
+      if (recv_mhandle) {
+        tcpx_dereg_mr(recv_comm, recv_mhandle);
+        recv_mhandle = nullptr;
+      }
+      if (use_host_recv && recv_buf) {
+        cudaFreeHost(recv_buf);
+        recv_buf = nullptr;
+      }
+      if (d_base) {
+        cuMemFree(d_base);
+        d_base = 0;
+      }
+      if (recv_comm) {
+        tcpx_close_recv(recv_comm);
+        recv_comm = nullptr;
+      }
+      if (listen_comm) {
+        tcpx_close_listen(listen_comm);
+        listen_comm = nullptr;
+      }
+      if (bootstrap_fd >= 0) {
+        close(bootstrap_fd);
+        bootstrap_fd = -1;
+      }
+      if (cuCtx) {
+        cuDevicePrimaryCtxRelease(cuDev);
+        cuCtx = nullptr;
+      }
+    };
+
+    auto fail_server = [&](const char* message) -> int {
+      if (message && *message) {
+        std::cout << message << std::endl;
+      }
+      cleanup_server();
+      return 1;
+    };
 
     if (!cuda_check(cuInit(0), "cuInit") ||
         !cuda_check(cuDeviceGet(&cuDev, dev_id), "cuDeviceGet") ||
         !cuda_check(cuDevicePrimaryCtxRetain(&cuCtx, cuDev), "cuDevicePrimaryCtxRetain") ||
         !cuda_check(cuCtxSetCurrent(cuCtx), "cuCtxSetCurrent") ||
         !cuda_check(cuMemAlloc(&d_base, kRegisteredBytes + 4096), "cuMemAlloc")) {
-      if (d_base) cuMemFree(d_base);
-      if (cuCtx) cuDevicePrimaryCtxRelease(cuDev);
-      tcpx_close_recv(recv_comm);
-      tcpx_close_listen(listen_comm);
-      return 1;
+      return fail_server("[DEBUG] ERROR: failed to allocate server receive buffer");
     }
 
-    // Allow host receive debug path via env to isolate GPUDirect issues
-    const char* host_recv_dbg = std::getenv("UCCL_TCPX_HOST_RECV_DEBUG");
-    bool use_host_recv = false;
-    void* recv_buf = nullptr;
+    if (cudaSetDevice(dev_id) != cudaSuccess) {
+      return fail_server("[DEBUG] ERROR: cudaSetDevice failed for server");
+    }
 
-    if (host_recv_dbg) {
-      char c = host_recv_dbg[0];
-      if (c == '1' || c == 't' || c == 'T' || c == 'y' || c == 'Y') {
+    uintptr_t addr = static_cast<uintptr_t>(d_base);
+    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);
+    d_aligned = static_cast<CUdeviceptr>(addr);
+    std::cout << "[DEBUG] Server GPU buffer aligned to 0x" << std::hex << d_aligned
+              << " (base 0x" << d_base << ")" << std::dec << std::endl;
+
+    int recv_ptr_type = NCCL_PTR_CUDA;
+    if (const char* env = std::getenv("UCCL_TCPX_HOST_RECV_DEBUG")) {
+      char flag = env[0];
+      if (flag == '1' || flag == 't' || flag == 'T' || flag == 'y' || flag == 'Y') {
         use_host_recv = true;
       }
     }
 
-    // Align GPU buffer to the nearest 4KB boundary for GPUDirect TCPX.
-    uintptr_t addr = static_cast<uintptr_t>(d_base);
-    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);  // 4KB aligned
-    CUdeviceptr d_aligned = static_cast<CUdeviceptr>(addr);
-    std::cout << "[DEBUG] GPU buffer aligned to 0x" << std::hex << d_aligned
-              << std::dec << " (original address: 0x" << std::hex << d_base << std::dec << ")" << std::endl;
-
-    void* recv_mhandle = nullptr;
-    int recv_ptr_type = NCCL_PTR_CUDA;
     if (use_host_recv) {
       void* host_aligned = nullptr;
       if (cudaMallocHost(&host_aligned, kRegisteredBytes) != cudaSuccess || !host_aligned) {
-        std::cout << "[DEBUG] ERROR: cudaMallocHost failed for host recv" << std::endl;
-        cuMemFree(d_base);
-        tcpx_close_recv(recv_comm);
-        tcpx_close_listen(listen_comm);
-        cuDevicePrimaryCtxRelease(cuDev);
-        return 1;
+        return fail_server("[DEBUG] ERROR: cudaMallocHost failed for server receive buffer");
       }
       std::memset(host_aligned, 0, kRegisteredBytes);
       recv_buf = host_aligned;
       recv_ptr_type = NCCL_PTR_HOST;
-      std::cout << "[DEBUG] Host-recv fallback enabled; host buffer=" << recv_buf << std::endl;
+      std::cout << "[DEBUG] Host fallback enabled; pinned buffer=" << recv_buf << std::endl;
     } else {
       recv_buf = reinterpret_cast<void*>(d_aligned);
-      recv_ptr_type = NCCL_PTR_CUDA;
     }
 
-    // ===== �����������??��������ڴ�ע������������ύ??=====
-    // �����ǵڶ����ؼ�����㣺��GPU�ڴ�ע�ᵽTCPX���ύ�첽������??    // ��ʷ����������??    // 1. ����ڴ�ע��ʧ�ܣ�ͨ������ΪGPU�ڴ�??KB�����gpumemd����δ��??    // 2. ���tcpx_irecvʧ�ܣ�������recv_comm�����Ч���ڴ���������
-
-    // ===== 【问题代码区�?：服务端内存注册与接收请求提交�?=====
-    // 这里是第二个关键问题点：将GPU内存注册到TCPX并提交异步接收请�?    // 历史问题根因分析�?    // 1. 如果内存注册失败，通常是因为GPU内存�?KB对齐或gpumemd服务未运�?    // 2. 如果tcpx_irecv失败，可能是recv_comm句柄无效或内存句柄有问题
     if (tcpx_reg_mr(recv_comm, recv_buf, kRegisteredBytes, recv_ptr_type, &recv_mhandle) != 0) {
-      std::cout << "[DEBUG] ERROR: Server memory registration failed (tcpx_reg_mr)" << std::endl;
-      std::cout << "[DEBUG] Possible causes: 1)GPU memory not 4KB aligned 2)gpumemd service not running 3)DMABUF permission issue" << std::endl;
-      if (use_host_recv && recv_buf) cudaFreeHost(recv_buf);
-      cuMemFree(d_base);
-      tcpx_close_recv(recv_comm);
-      tcpx_close_listen(listen_comm);
-      cuDevicePrimaryCtxRelease(cuDev);
-      return 1;
+      return fail_server("[DEBUG] ERROR: tcpx_reg_mr failed for server receive buffer");
     }
-    std::cout << "[DEBUG] Server memory registration successful, recv_mhandle=" << recv_mhandle
-              << ", buffer=" << recv_buf << ", size=" << kRegisteredBytes << " bytes" << std::endl;
 
-    // Get payload size from environment or use default
-    const char* payload_env = std::getenv("UCCL_TCPX_PAYLOAD_BYTES");
-    size_t payload_bytes = payload_env ? std::atoi(payload_env) : kDefaultPayloadBytes;
-    if (payload_bytes > kRegisteredBytes) payload_bytes = kRegisteredBytes;
-
-    // Prepare async receive request parameter arrays
-    // TCPX API uses array format to support batch operations, here we only have one receive operation
-    void* recv_data[1] = {recv_buf};                              // Receive buffer address
-    int recv_sizes[1] = {static_cast<int>(payload_bytes)};        // Expected data size to receive
-    int recv_tags[1] = {kTransferTag};                            // Message tag (for matching sender)
-    void* recv_mhandles[1] = {recv_mhandle};                      // Memory handle
-    void* recv_request = nullptr;                                 // Async request handle (for subsequent polling)
-
-    // 【关键步骤】提交异步接收请�?    // 这里是历史问题的核心：如果这一步成功但后续只收�?6B控制消息�?    // 说明客户端的发送有问题（通常是小包zero-copy路径异常或过早关闭连接）
+    std::cout << "[DEBUG] Registered server receive buffer ptr=" << recv_buf
+              << ", bytes=" << kRegisteredBytes << std::endl;
+    void* recv_data[1] = {recv_buf};
+    int recv_sizes[1] = {static_cast<int>(payload_bytes)};
+    int recv_tags[1] = {kTransferTag};
+    void* recv_mhandles[1] = {recv_mhandle};
     if (tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags,
                    recv_mhandles, &recv_request) != 0) {
-      std::cout << "[DEBUG] ERROR: Async receive request submission failed (tcpx_irecv)" << std::endl;
-      std::cout << "[DEBUG] Possible causes: 1)recv_comm handle invalid 2)memory handle issue 3)parameter mismatch" << std::endl;
-      tcpx_dereg_mr(recv_comm, recv_mhandle);
-      if (use_host_recv && recv_buf) cudaFreeHost(recv_buf);
-      cuMemFree(d_base);
-      tcpx_close_recv(recv_comm);
-      tcpx_close_listen(listen_comm);
-      cuDevicePrimaryCtxRelease(cuDev);
-      return 1;
+      return fail_server("[DEBUG] ERROR: tcpx_irecv failed on server");
     }
-
-    // ===== 【问题代码区�?：服务端接收轮询与历史问题现场�?=====
-    // 这里是历史问题的核心现场：服务端等待数据但只收到16B控制消息
-    //
-    // 【历史问题详细分析】：
-    // 1. 现象：服务端tcpx_irecv提交成功，但tcpx_test轮询时只收到16B控制消息�?    //    随后客户端连接关闭，payload数据永远没有到达，最终超�?    // 2. 根本原因�?    //    a) 客户端使用sizeof(kTestMessage)=25B，但实际发�?4B，大小不一�?    //    b) 小包(<4KB)触发MSG_ZEROCOPY路径，内核errqueue处理异常
-    //    c) 客户端发送完成后立即关闭连接，没有等待服务端确认
-    // 3. 修复方案�?    //    a) 统一使用strlen语义(sizeof-1)，确保收发大小一�?    //    b) 强制<4KB走copy路径，避免小包zero-copy的errqueue问题
-    //    c) 客户端发送后增加延迟，给服务端处理时�?
-    std::cout << "[DEBUG] Starting to wait for client data, expected size: " << payload_bytes << " bytes..." << std::endl;
-    int done = 0;           // Completion flag: 0=not completed, 1=completed
-    int received_size = 0;  // Actually received bytes
-    // 轮询接收完成状态，最多等待约2�?200000 * 10微秒)
-    // 如果在这个循环中一直done=0，说明数据没有到达（历史问题现场�?    for (int i = 0; i < 200000 && !done; ++i) {
+    request_posted = true;
+    std::cout << "[DEBUG] Waiting for client data, expected bytes=" << payload_bytes << std::endl;
+    int poll_iterations = 0;
+    for (; poll_iterations < 200000 && !done; ++poll_iterations) {
       int rc_test = tcpx_test(recv_request, &done, &received_size);
       if (rc_test != 0) {
-        std::cout << "[DEBUG] ERROR: tcpx_test returned error code: " << rc_test << std::endl;
-        std::cout << "[DEBUG] This usually indicates connection error or invalid request handle" << std::endl;
+        std::cout << "[DEBUG] ERROR: tcpx_test returned " << rc_test << std::endl;
         break;
       }
-      // �?0微秒检查一次，避免CPU占用过高
-      if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
-
-      // Print progress every 1000 iterations (~10ms) to help diagnose stuck positions
-      if (i > 0 && i % 1000 == 0) {
-        std::cout << "[DEBUG] Polling progress: " << i << "/200000, done=" << done
-                  << ", received_size=" << received_size << std::endl;
+      if (!done) {
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
       }
+      if (poll_iterations > 0 && poll_iterations % 1000 == 0) {
+        std::cout << "[DEBUG] Polling progress: iteration=" << poll_iterations
+                  << " done=" << done << " received_size=" << received_size << std::endl;
+      }
+    }
+    std::cout << "[DEBUG] tcpx_test poll loop iterations=" << poll_iterations
+              << " done=" << done << " received_size=" << received_size << std::endl;
+    if (done && received_size == 0) {
+      std::cout << "[DEBUG] tcpx_test reported size=0 (expected for GPU path)"
+                << std::endl;
     }
 
     std::vector<unsigned char> host(payload_bytes, 0);
     bool success = false;
     bool copy_ok = false;
     size_t bytes_copied = 0;
-    void* recv_dev_handle = nullptr;  // Add missing variable
+
 
     if (!done) {
       std::cout << "[DEBUG] ERROR: receive timed out" << std::endl;
@@ -434,52 +387,67 @@ int main(int argc, char** argv) {
     } else {
       auto* rx_req = reinterpret_cast<TcpxRequest*>(recv_request);
       auto* dev_handle_struct = reinterpret_cast<NcclNetDeviceHandle*>(recv_dev_handle);
-      if (!rx_req || !rx_req->unpack_slot.mem || !rx_req->unpack_slot.cnt || !dev_handle_struct) {
+      uint64_t frag_count = (rx_req && rx_req->unpack_slot.cnt) ? *(rx_req->unpack_slot.cnt) : 0;
+      std::cout << "[DEBUG] Request metadata: request_ptr=" << rx_req
+                << " active=" << (rx_req ? rx_req->unpack_slot.active : 0)
+                << " idx=" << (rx_req ? rx_req->unpack_slot.idx : 0)
+                << " cnt_cache=" << (rx_req ? rx_req->unpack_slot.cnt_cache : 0)
+                << " cnt_ptr=" << (rx_req && rx_req->unpack_slot.cnt ? rx_req->unpack_slot.cnt : nullptr)
+                << " meta_ptr=" << (rx_req ? rx_req->unpack_slot.mem : nullptr)
+                << " size=" << (rx_req ? rx_req->size : 0)
+                << " size_pending=" << (rx_req ? rx_req->size_pending : 0)
+                << " frag_count=" << frag_count << std::endl;
+      if (!rx_req || !dev_handle_struct || !rx_req->unpack_slot.mem || !rx_req->unpack_slot.cnt) {
         std::cout << "[DEBUG] ERROR: missing TCPX metadata for device unpack" << std::endl;
+      } else if (frag_count == 0) {
+        std::cout << "[DEBUG] ERROR: unpack metadata contains zero fragments (cnt_cache="
+                  << rx_req->unpack_slot.cnt_cache << ")" << std::endl;
+      } else if (frag_count > MAX_UNPACK_DESCRIPTORS) {
+        std::cout << "[DEBUG] ERROR: fragment count " << frag_count
+                  << " exceeds descriptor capacity" << std::endl;
       } else {
-        uint64_t frag_count = *(rx_req->unpack_slot.cnt);
         auto* meta_entries = static_cast<LoadMetaEntry*>(rx_req->unpack_slot.mem);
-        if (frag_count == 0) {
-          std::cout << "[DEBUG] ERROR: unpack metadata contains zero fragments" << std::endl;
-        } else if (frag_count > tcpx::rx::MAX_UNPACK_DESCRIPTORS) {
-          std::cout << "[DEBUG] ERROR: fragment count " << frag_count
-                    << " exceeds descriptor capacity" << std::endl;
+        UnpackNetDeviceHandle dev_handle{};
+        if (!cuda_check(cuMemcpyDtoH(&dev_handle,
+                                     reinterpret_cast<CUdeviceptr>(dev_handle_struct->handle),
+                                     sizeof(dev_handle)),
+                            "cuMemcpyDtoH(device_handle)")) {
+          std::cout << "[DEBUG] ERROR: failed to read device handle metadata" << std::endl;
         } else {
-          UnpackNetDeviceHandle dev_handle{};
-          if (!cuda_check(cuMemcpyDtoH(&dev_handle,
-                                       reinterpret_cast<CUdeviceptr>(dev_handle_struct->handle),
-                                       sizeof(dev_handle)),
-                          "cuMemcpyDtoH(device_handle)")) {
-            std::cout << "[DEBUG] ERROR: failed to read device handle metadata" << std::endl;
+          std::cout << "[DEBUG] Device handle: meta=" << dev_handle.meta
+                    << " bounce_buf=" << dev_handle.bounce_buf
+                    << " head=" << dev_handle.head << std::endl;
+          tcpx::rx::UnpackDescriptorBlock desc_block;
+          desc_block.count = static_cast<uint32_t>(frag_count);
+          desc_block.total_bytes = 0;
+          desc_block.bounce_buffer = dev_handle.bounce_buf;
+          desc_block.dst_buffer = reinterpret_cast<void*>(d_aligned);
+          for (uint32_t i = 0; i < desc_block.count; ++i) {
+            desc_block.descriptors[i].src_off = meta_entries[i].src_off;
+            desc_block.descriptors[i].len = meta_entries[i].len;
+            desc_block.descriptors[i].dst_off = meta_entries[i].dst_off;
+            desc_block.total_bytes += meta_entries[i].len;
+            std::cout << "[DEBUG] descriptor[" << i << "] src_off=" << meta_entries[i].src_off
+                      << " len=" << meta_entries[i].len
+                      << " dst_off=" << meta_entries[i].dst_off << std::endl;
+          }
+          tcpx::device::UnpackLaunchConfig unpack_cfg;
+          tcpx::device::UnpackLauncher unpack_launcher(unpack_cfg);
+          std::cout << "[DEBUG] Launching device unpack, total_bytes="
+                    << desc_block.total_bytes << std::endl;
+          if (unpack_launcher.launchSync(desc_block) != 0) {
+            std::cout << "[DEBUG] ERROR: device unpack kernel launch failed" << std::endl;
+          } else if (!cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes),
+                                      "cuMemcpyDtoH(dst)")) {
+            std::cout << "[DEBUG] ERROR: failed to copy unpacked payload to host" << std::endl;
           } else {
-            tcpx::rx::UnpackDescriptorBlock desc_block;
-            desc_block.count = static_cast<uint32_t>(frag_count);
-            desc_block.total_bytes = 0;
-            desc_block.bounce_buffer = dev_handle.bounce_buf;
-            desc_block.dst_buffer = reinterpret_cast<void*>(d_aligned);
-            for (uint32_t i = 0; i < desc_block.count; ++i) {
-              desc_block.descriptors[i].src_off = meta_entries[i].src_off;
-              desc_block.descriptors[i].len = meta_entries[i].len;
-              desc_block.descriptors[i].dst_off = meta_entries[i].dst_off;
-              desc_block.total_bytes += meta_entries[i].len;
-            }
-
-            tcpx::device::UnpackLaunchConfig unpack_cfg;
-            tcpx::device::UnpackLauncher unpack_launcher(unpack_cfg);
-            if (unpack_launcher.launchSync(desc_block) != 0) {
-              std::cout << "[DEBUG] ERROR: device unpack kernel launch failed" << std::endl;
-            } else if (!cuda_check(cuMemcpyDtoH(host.data(), d_aligned, payload_bytes),
-                                    "cuMemcpyDtoH(dst)")) {
-              std::cout << "[DEBUG] ERROR: failed to copy unpacked payload to host" << std::endl;
-            } else {
-              copy_ok = true;
-              bytes_copied = desc_block.total_bytes;
-            }
+            copy_ok = true;
+            bytes_copied = desc_block.total_bytes;
           }
         }
       }
-    }
 
+    }
     if (copy_ok) {
       dump_hex(host.data(), std::min<size_t>(payload_bytes, 32));
       size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);
@@ -500,22 +468,24 @@ int main(int argc, char** argv) {
       std::cout << "[DEBUG] ERROR: device unpack failed" << std::endl;
     }
 
-    if (recv_request && done) {
-      tcpx_irecv_consumed(recv_comm, 1, recv_request);
-    }
-
-    if (recv_mhandle) tcpx_dereg_mr(recv_comm, recv_mhandle);
-    if (use_host_recv && recv_buf) cudaFreeHost(recv_buf);
-    cuMemFree(d_base);
-    tcpx_close_recv(recv_comm);
-    tcpx_close_listen(listen_comm);
-    if (bootstrap_fd >= 0) close(bootstrap_fd);
-    cuDevicePrimaryCtxRelease(cuDev);
+    cleanup_server();
     return success ? 0 : 1;
 
-
   } else {
+    if (argc < 3) {
+      std::cout << "[DEBUG] ERROR: client mode requires <remote_ip>" << std::endl;
+      return 1;
+    }
+    const char* remote_ip = argv[2];
+    std::cout << "[DEBUG] Running in CLIENT mode, connecting to " << remote_ip << std::endl;
 
+    int bootstrap_fd = connect_to_bootstrap_server(remote_ip);
+    if (bootstrap_fd < 0) {
+      std::cout << "[DEBUG] ERROR: bootstrap connect failed" << std::endl;
+      return 1;
+    }
+
+    ncclNetHandle_v7 handle{};
     size_t total_received = 0;
     while (total_received < kHandleBytes) {
       ssize_t r = recv(bootstrap_fd, handle.data + total_received,
@@ -527,15 +497,13 @@ int main(int argc, char** argv) {
       }
       total_received += static_cast<size_t>(r);
     }
-    // Keep bootstrap_fd open to wait for server's 1-byte ACK after send
 
     void* send_comm = nullptr;
-    // Pre-allocate device handle storage (some implementations require caller to provide buffer)
     alignas(16) unsigned char send_dev_handle_storage[512] = {0};
     void* send_dev_handle = send_dev_handle_storage;
-    if (tcpx_connect_v5(dev_id, &handle, &send_comm, &send_dev_handle) != 0 ||
-        !send_comm) {
+    if (tcpx_connect_v5(dev_id, &handle, &send_comm, &send_dev_handle) != 0 || !send_comm) {
       std::cout << "[DEBUG] ERROR: tcpx_connect_v5 connection failed" << std::endl;
+      close(bootstrap_fd);
       return 1;
     }
     std::cout << "[DEBUG] TCPX connection established; send_comm=" << send_comm
@@ -545,131 +513,132 @@ int main(int argc, char** argv) {
     CUcontext cuCtx = nullptr;
     CUdeviceptr d_base = 0;
     CUdeviceptr d_aligned = 0;
+    void* send_mhandle = nullptr;
+    void* send_request = nullptr;
+    int done = 0;  // Changed from bool to int for tcpx_test
+    int sent_size = 0;
+
+    auto cleanup_client = [&]() {
+      if (send_mhandle) {
+        tcpx_dereg_mr(send_comm, send_mhandle);
+        send_mhandle = nullptr;
+      }
+      if (d_base) {
+        cuMemFree(d_base);
+        d_base = 0;
+      }
+      if (send_comm) {
+        tcpx_close_send(send_comm);
+        send_comm = nullptr;
+      }
+      if (bootstrap_fd >= 0) {
+        close(bootstrap_fd);
+        bootstrap_fd = -1;
+      }
+      if (cuCtx) {
+        cuDevicePrimaryCtxRelease(cuDev);
+        cuCtx = nullptr;
+      }
+    };
+
+    auto fail_client = [&](const char* message) -> int {
+      if (message && *message) {
+        std::cout << message << std::endl;
+      }
+      cleanup_client();
+      return 1;
+    };
 
     if (!cuda_check(cuInit(0), "cuInit") ||
         !cuda_check(cuDeviceGet(&cuDev, dev_id), "cuDeviceGet") ||
         !cuda_check(cuDevicePrimaryCtxRetain(&cuCtx, cuDev), "cuDevicePrimaryCtxRetain") ||
         !cuda_check(cuCtxSetCurrent(cuCtx), "cuCtxSetCurrent") ||
         !cuda_check(cuMemAlloc(&d_base, kRegisteredBytes + 4096), "cuMemAlloc")) {
-      if (d_base) cuMemFree(d_base);
-      if (cuCtx) cuDevicePrimaryCtxRelease(cuDev);
-      tcpx_close_send(send_comm);
-      return 1;
+      return fail_client("[DEBUG] ERROR: failed to allocate client send buffer");
     }
 
-    // Prepare payload in host memory according to payload_bytes
+    if (cudaSetDevice(dev_id) != cudaSuccess) {
+      return fail_client("[DEBUG] ERROR: cudaSetDevice failed for client");
+    }
 
-    // ===== 【问题代码区�?：客户端GPU缓冲区准备与内存注册�?=====
-    // 这里是客户端侧的关键问题区域：GPU内存对齐、数据准备和内存注册
-
-    // 【关键步�?】GPU内存4KB对齐（与服务端相同的要求�?    uintptr_t addr = static_cast<uintptr_t>(d_base);
-    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);  // 4KB对齐
+    uintptr_t addr = static_cast<uintptr_t>(d_base);
+    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);
     d_aligned = static_cast<CUdeviceptr>(addr);
 
-    // 【关键步�?】准备要发送的数据
-    // 历史问题：之前直接使用sizeof(kTestMessage)=25B，包含了'\0'终止�?    // 但传输层实际只处�?4B可见字符，造成大小不一致，触发各种异常
     std::vector<unsigned char> host_payload(payload_bytes, 0);
-    size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);  // 只复制可见字�?    if (prefix) std::memcpy(host_payload.data(), kTestMessage, prefix);
-    if (payload_bytes > prefix) host_payload[payload_bytes - 1] = 0xAB;  // 添加哨兵字节便于验证
+    size_t prefix = std::min(payload_bytes, sizeof(kTestMessage) - 1);
+    if (prefix > 0) {
+      std::memcpy(host_payload.data(), kTestMessage, prefix);
+    }
+    if (payload_bytes > prefix) {
+      host_payload[payload_bytes - 1] = 0xAB;
+    }
 
-    // 将数据从主机内存复制到GPU内存
     cuda_check(cuMemcpyHtoD(d_aligned, host_payload.data(), payload_bytes), "cuMemcpyHtoD");
+    cuCtxSynchronize();
 
-    // 【重要】确保GPU内存写入完成，避免zero-copy发送时读取到未完成的数�?    cuCtxSynchronize();
-
-    // 调试：发送前验证GPU缓冲区内容，确保数据正确
-    {
-      size_t dump = std::min<size_t>(payload_bytes, 32);
-      std::vector<unsigned char> verify(dump, 0);
-      if (cuda_check(cuMemcpyDtoH(verify.data(), d_aligned, dump), "pre-send cuMemcpyDtoH")) {
-        std::cout << "[DEBUG] Client GPU buffer content verification (" << dump << " bytes):" << std::endl;
-        dump_hex(verify.data(), dump);
-      }
-    }
-
-    // ===== 【问题代码区�?：客户端内存注册�?=====
-    // 这里是客户端内存注册，如果失败通常是GPU内存对齐或gpumemd问题
-    void* send_mhandle = nullptr;
+    void* send_mhandle_local = nullptr;
     if (tcpx_reg_mr(send_comm, reinterpret_cast<void*>(d_aligned),
-                    kRegisteredBytes, NCCL_PTR_CUDA, &send_mhandle) != 0) {
-      std::cout << "[DEBUG] 错误：客户端内存注册失败 (tcpx_reg_mr)" << std::endl;
-      std::cout << "[DEBUG] 可能原因�?)GPU内存�?KB对齐 2)gpumemd服务未运�?3)send_comm句柄无效" << std::endl;
-      cuMemFree(d_base);
-      tcpx_close_send(send_comm);
-      cuDevicePrimaryCtxRelease(cuDev);
-      return 1;
+                    kRegisteredBytes, NCCL_PTR_CUDA, &send_mhandle_local) != 0) {
+      return fail_client("[DEBUG] ERROR: tcpx_reg_mr failed for client send buffer");
     }
-    std::cout << "[DEBUG] 客户端内存注册成�? send_mhandle=" << send_mhandle << std::endl;
+    send_mhandle = send_mhandle_local;
+    std::cout << "[DEBUG] Registered client send buffer ptr=" << reinterpret_cast<void*>(d_aligned)
+              << ", bytes=" << kRegisteredBytes << std::endl;
 
-    // ===== 【问题代码区�?：客户端异步发送与历史问题根源�?=====
-    // 这里是历史问题的根源：客户端发送逻辑和过早关闭连�?
-    void* send_request = nullptr;
-    // 【关键步骤】提交异步发送请�?    // 历史问题：这里成功提交，但由于小包zero-copy路径异常�?    // 实际只发送了16B控制消息，payload数据没有正确传输
     if (tcpx_isend(send_comm, reinterpret_cast<void*>(d_aligned),
                    static_cast<int>(payload_bytes), kTransferTag, send_mhandle,
                    &send_request) != 0) {
-      std::cout << "[DEBUG] 错误：异步发送请求提交失�?(tcpx_isend)" << std::endl;
-      std::cout << "[DEBUG] 可能原因�?)send_comm句柄无效 2)内存句柄问题 3)参数错误" << std::endl;
-      tcpx_dereg_mr(send_comm, send_mhandle);
-      cuMemFree(d_base);
-      tcpx_close_send(send_comm);
-      cuDevicePrimaryCtxRelease(cuDev);
-      return 1;
+      return fail_client("[DEBUG] ERROR: tcpx_isend failed");
     }
-    std::cout << "[DEBUG] 异步发送请求已提交，开始轮询完成状�?.." << std::endl;
 
-    // 【关键步骤】轮询发送完成状�?    // 历史问题分析�?    // 1. 客户端这里可能返回done=1，但实际上只是控制消息发送完�?    // 2. 由于小包走了MSG_ZEROCOPY路径，errqueue处理异常，payload数据丢失
-    // 3. 客户端误以为发送成功，立即关闭连接，导致服务端只收�?6B控制消息
-    int done = 0;       // 发送完成标�?    int sent_size = 0;  // 实际发送的字节�?    for (int i = 0; i < 200000 && !done; ++i) {
+    std::cout << "[DEBUG] tcpx_isend returned rc=0, request=" << send_request << std::endl;
+    int send_iterations = 0;
+    for (; send_iterations < 200000 && !done; ++send_iterations) {
       int rc_test = tcpx_test(send_request, &done, &sent_size);
       if (rc_test != 0) {
-        std::cout << "[DEBUG] 错误：tcpx_test返回错误�?" << rc_test << std::endl;
+        std::cout << "[DEBUG] ERROR: tcpx_test (client) returned " << rc_test << std::endl;
         break;
       }
-      if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
-
-      // �?000次迭代打印进�?      if (i > 0 && i % 1000 == 0) {
-        std::cout << "[DEBUG] 发送轮询进�? " << i << "/200000, done=" << done
-                  << ", sent_size=" << sent_size << std::endl;
+      if (!done) {
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
+      if (send_iterations > 0 && send_iterations % 1000 == 0) {
+        std::cout << "[DEBUG] Send polling: iteration=" << send_iterations
+                  << " done=" << done << " sent_size=" << sent_size << std::endl;
       }
     }
-
+    std::cout << "[DEBUG] Send loop iterations=" << send_iterations
+              << " done=" << done << " sent_size=" << sent_size << std::endl;
     if (done) {
-      std::cout << "[DEBUG] 发送完成，实际发送字节数=" << sent_size
-                << " (期望=" << payload_bytes << ")" << std::endl;
-      // 检查发送字节数是否与期望一�?      if (sent_size != static_cast<int>(payload_bytes)) {
-        std::cout << "[DEBUG] Warning: Send byte count mismatch! This may indicate partial data loss" << std::endl;
+      if (sent_size == 0) {
+        std::cout << "[DEBUG] tcpx_test reported size=0 for send (expected when GPU"
+                     " completions are handled internally)" << std::endl;
       }
+      std::cout << "[DEBUG] Send completed (payload=" << payload_bytes << " bytes)"
+                << std::endl;
     } else {
-      std::cout << "[DEBUG] 警告：发送在超时前未完成，可能存在网络或传输问题" << std::endl;
+      std::cout << "[DEBUG] WARNING: send did not complete before timeout" << std::endl;
     }
 
-    // ===== 【问题代码区�?：客户端等待服务端确认，避免过早关闭�?=====
-    // 这里是修复历史问题的关键：通过bootstrap TCP连接等待服务端ACK
-    // 历史问题：客户端发送完成后立即关闭TCPX连接，服务端来不及处理payload
-    // 修复方案：复用bootstrap TCP连接，等待服务端发�?字节ACK确认收到数据
-    std::cout << "[DEBUG] 等待服务端通过bootstrap连接发送ACK确认..." << std::endl;
     if (bootstrap_fd >= 0) {
-      // 设置2秒接收超时，避免无限等待
-      timeval tv{}; tv.tv_sec = 2; tv.tv_usec = 0;
+      timeval tv{};
+      tv.tv_sec = 2;
+      tv.tv_usec = 0;
       setsockopt(bootstrap_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       char ack = 0;
       ssize_t r = recv(bootstrap_fd, &ack, 1, 0);
       if (r == 1 && ack == 1) {
-        std::cout << "[DEBUG] Received server ACK confirmation, data transfer successful" << std::endl;
+        std::cout << "[DEBUG] Received server ACK" << std::endl;
       } else {
-        std::cout << "[DEBUG] 警告：未收到服务端ACK，可能传输有问题 (recv返回=" << r << ", ack=" << (int)ack << ")" << std::endl;
+        std::cout << "[DEBUG] WARNING: did not receive server ACK (recv=" << r
+                  << ", ack=" << static_cast<int>(ack) << ")" << std::endl;
       }
-    } else {
-      std::cout << "[DEBUG] 警告：bootstrap连接无效，无法等待服务端ACK" << std::endl;
     }
 
-    tcpx_dereg_mr(send_comm, send_mhandle);
-    cuMemFree(d_base);
-    tcpx_close_send(send_comm);
-    if (bootstrap_fd >= 0) close(bootstrap_fd);
-    cuDevicePrimaryCtxRelease(cuDev);
+    cleanup_client();
     return done ? 0 : 1;
   }
 }
+
 
