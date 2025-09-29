@@ -12,8 +12,8 @@
 
 #ifdef __CUDACC__
 #include <cuda_runtime.h>
-#else
-// Dummy CUDA types for non-CUDA builds
+#elif !defined(CUDA_RUNTIME_H)
+// Dummy CUDA types for non-CUDA builds (only if not already defined)
 typedef void* cudaStream_t;
 #endif
 

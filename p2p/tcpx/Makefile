@@ -71,7 +71,7 @@ test_build_simple_cuda: $(RX_OBJS) $(DEVICE_OBJS)
 	$(NVCC) $(NVCCFLAGS) -o tests/test_build_simple_cuda tests/test_build_simple.cc $(RX_OBJS) $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS)
 
 # Build targets
-all: test_device_discovery test_connection test_tcpx_transfer test_performance
+all: $(RX_OBJS) $(DEVICE_OBJS) test_device_discovery test_connection test_tcpx_transfer test_performance test_build_simple
 
 # New modular architecture tests
 unpack_tests: test_rx_cmsg_parser test_rx_descriptor test_device_unpack test_tcpx_integration
@@ -80,10 +80,16 @@ unpack_tests: test_rx_cmsg_parser test_rx_descriptor test_device_unpack test_tcp
 all_tests: all unpack_tests benchmark_tcpx_unpack
 
 # Build tests without CUDA dependency
-no-cuda: test_device_discovery test_tcpx test_performance test_rx_cmsg_parser test_rx_descriptor test_build_simple
+no-cuda: test_device_discovery test_tcpx test_performance test_build_simple
 
 # Quick build test
-quick_test: test_build_simple test_build_simple_cuda
+quick_test: test_build_simple
+
+# Simple build everything
+build_all: $(RX_OBJS) $(DEVICE_OBJS) test_tcpx_transfer
+	@echo "All TCPX unpack components built successfully!"
+	@echo "Available executables:"
+	@ls -la tests/test_* 2>/dev/null || echo "No test executables found"
 
 # Build connection test without CUDA (host memory only)
 test_connection_host:

@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include "../rx/rx_descriptor.h"
+#include "../device/unpack_launch.h"
 
 namespace tcpx {
 namespace device {
@@ -200,10 +201,10 @@ extern "C" __global__ void tcpxUnpackKernelSmall(
 // Kernel launch parameters calculation (use header definition)
 
 // Calculate optimal launch parameters
-extern "C" __host__ KernelLaunchParams calculateLaunchParams(
+extern "C" __host__ tcpx::device::KernelLaunchParams calculateLaunchParams(
     const tcpx::rx::UnpackDescriptorBlock& desc_block) {
   
-  KernelLaunchParams params;
+  tcpx::device::KernelLaunchParams params;
   
   if (desc_block.count == 0) {
     params.grid_size = dim3(0);
