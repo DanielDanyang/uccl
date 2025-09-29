@@ -183,20 +183,36 @@ int UnpackLauncher::launchKernel(const KernelLaunchParams& params) {
   
   cudaError_t err;
   
+  // Optional: probe mode. If env UCCL_TCPX_PROBE_BYTE=1 we launch a minimal kernel first
+  const char* probe_env = std::getenv("UCCL_TCPX_PROBE_BYTE");
+  if (probe_env && std::string(probe_env) == "1") {
+    std::cerr << "[Debug Kernel] ProbeByte kernel launch..." << std::endl;
+    tcpxUnpackKernelProbeByte<<<1, 1, 0, config_.stream>>>(d_desc_ptr);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      std::cerr << "[Debug Kernel] ProbeByte launch failed: " << cudaGetErrorString(err) << std::endl;
+      return -1;
+    }
+  }
+
   if (config_.use_small_kernel) {
-    tcpxUnpackKernelSmall<<<params.grid_size, params.block_size, 
+    std::cerr << "[Debug Kernel] Launch Small: grid=" << params.grid_size.x
+              << " block=" << params.block_size.x << std::endl;
+    tcpxUnpackKernelSmall<<<params.grid_size, params.block_size,
                            params.shared_mem_size, config_.stream>>>(d_desc_ptr);
   } else {
+    std::cerr << "[Debug Kernel] Launch Main: grid=" << params.grid_size.x
+              << " block=" << params.block_size.x << std::endl;
     tcpxUnpackKernel<<<params.grid_size, params.block_size,
                       params.shared_mem_size, config_.stream>>>(d_desc_ptr);
   }
-  
+
   err = cudaGetLastError();
   if (err != cudaSuccess) {
     std::cerr << "Kernel launch failed: " << cudaGetErrorString(err) << std::endl;
     return -1;
   }
-  
+
   return 0;
 }
 

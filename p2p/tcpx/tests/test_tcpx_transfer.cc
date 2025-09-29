@@ -465,17 +465,47 @@ int main(int argc, char** argv) {
           if (impl == "kernel") {
             std::cout << "[DEBUG] Launching device unpack (kernel), total_bytes="
                       << desc_block.total_bytes << std::endl;
-            tcpx::device::UnpackLaunchConfig cfg;
-            cfg.stream = nullptr;               // use default stream to avoid stream mismatches
-            cfg.enable_profiling = false;       // avoid event sync during debugging
-            cfg.use_small_kernel = true;        // small payloads
-            tcpx::device::UnpackLauncher launcher(cfg);
-            int lrc = launcher.launchSync(desc_block);
-            if (lrc != 0) {
-              std::cout << "[DEBUG] ERROR: Unpack kernel failed rc=" << lrc << std::endl;
+
+            // Create dedicated stream to avoid default stream blocking
+            cudaStream_t dedicated_stream;
+            if (!cuda_check(cudaStreamCreate(&dedicated_stream), "cudaStreamCreate")) {
+              std::cout << "[Debug Kernel] ERROR: Failed to create dedicated stream" << std::endl;
               device_copy_ok = false;
             } else {
-              std::cout << "[DEBUG] Unpack kernel completed" << std::endl;
+              std::cout << "[Debug Kernel] Created dedicated stream: " << dedicated_stream << std::endl;
+
+              tcpx::device::UnpackLaunchConfig cfg;
+              cfg.stream = dedicated_stream;      // use dedicated stream
+              cfg.enable_profiling = false;       // avoid event sync during debugging
+              cfg.use_small_kernel = true;        // small payloads
+
+              std::cout << "[Debug Kernel] Config: stream=" << cfg.stream
+                        << " use_small=" << cfg.use_small_kernel
+                        << " profiling=" << cfg.enable_profiling << std::endl;
+
+              tcpx::device::UnpackLauncher launcher(cfg);
+
+              // Log descriptor block details
+              std::cout << "[Debug Kernel] DescBlock: count=" << desc_block.count
+                        << " total_bytes=" << desc_block.total_bytes
+                        << " bounce_buf=" << desc_block.bounce_buffer
+                        << " dst_buf=" << desc_block.dst_buffer
+                        << " ready_flag=" << desc_block.ready_flag << std::endl;
+
+              std::cout << "[Debug Kernel] Calling launcher.launchSync..." << std::endl;
+              int lrc = launcher.launchSync(desc_block);
+              std::cout << "[Debug Kernel] launcher.launchSync returned rc=" << lrc << std::endl;
+
+              if (lrc != 0) {
+                std::cout << "[Debug Kernel] ERROR: Unpack kernel failed rc=" << lrc << std::endl;
+                device_copy_ok = false;
+              } else {
+                std::cout << "[Debug Kernel] Unpack kernel completed successfully" << std::endl;
+              }
+
+              // Clean up stream
+              cudaStreamDestroy(dedicated_stream);
+              std::cout << "[Debug Kernel] Destroyed dedicated stream" << std::endl;
             }
           } else if (impl == "host") {
             std::cout << "[DEBUG] Launching host gather (DtoH+memcpy+HtoD), total_bytes="
