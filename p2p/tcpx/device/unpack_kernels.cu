@@ -6,8 +6,8 @@
  ************************************************************************/
 #include <cuda_runtime.h>
 #include <cstdint>
-#include "../rx/rx_descriptor.h"
-#include "../device/unpack_launch.h"
+#include "../include/rx_descriptor.h"
+#include "unpack_launch.h"
 
 // Forward declaration for device visibility barrier used by probe kernel
 namespace tcpx { namespace device {

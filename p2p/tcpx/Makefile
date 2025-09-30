@@ -6,8 +6,8 @@ CUDA_HOME ?= /usr/local/cuda
 NVCC      := $(CUDA_HOME)/bin/nvcc
 
 # Flags
-CXXFLAGS   := -std=c++17 -fPIC -O2 -Wall -I../include -I. -I$(CUDA_HOME)/include
-NVCCFLAGS  := -std=c++17 -Xcompiler "-fPIC -O2 -Wall" -I../include -I. -I$(CUDA_HOME)/include
+CXXFLAGS   := -std=c++17 -fPIC -O2 -Wall -Iinclude -I. -I$(CUDA_HOME)/include
+NVCCFLAGS  := -std=c++17 -Xcompiler "-fPIC -O2 -Wall" -Iinclude -I. -I$(CUDA_HOME)/include
 LIBS       := -ldl -lpthread
 CUDA_LIBS  := -L$(CUDA_HOME)/lib64 -lcuda -lcudart
 
@@ -53,11 +53,14 @@ quick: core
 # Check what files we have
 check:
 	@echo "=== File Check ==="
-	@echo "Core source files:"
-	@ls -la rx_descriptor.h device/*.cu device/*.h 2>/dev/null || echo "Missing core files"
+	@echo "Public headers:"
+	@ls -la include/*.h 2>/dev/null || echo "Missing header files"
 	@echo ""
 	@echo "Implementation files:"
-	@ls -la tcpx_impl.cc tcpx_interface.h 2>/dev/null || echo "Missing implementation files"
+	@ls -la tcpx_impl.cc 2>/dev/null || echo "Missing implementation files"
+	@echo ""
+	@echo "Device source files:"
+	@ls -la device/*.cu device/*.h 2>/dev/null || echo "Missing device files"
 	@echo ""
 	@echo "Test files:"
 	@ls -la tests/*.cc 2>/dev/null || echo "Missing test files"

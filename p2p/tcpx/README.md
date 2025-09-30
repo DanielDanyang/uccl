@@ -168,14 +168,26 @@ Client                          Server
 ---
 ## Components
 
-### TCPX Interface Layer
-- `tcpx_interface.h`: C API definitions
-- `tcpx_impl.cc`: TCPX plugin wrapper implementation
+### Public Headers (`include/`)
+All public API headers are in the `include/` directory:
 
-### RX Descriptor Module
-- `rx_descriptor.h`: Header-only descriptor construction utilities
+- **`tcpx_interface.h`**: TCPX C API definitions
+  - Connection management (listen, accept, connect)
+  - Memory registration (regMr, deregMr)
+  - Data transfer operations (isend, irecv, test)
+
+- **`tcpx_structs.h`**: TCPX plugin structure definitions
+  - `loadMeta`: Fragment descriptor (src_off, len, dst_off)
+  - `tcpxRequest`: Request handle structure
+  - `unpackSlot`: RX metadata slot
+
+- **`rx_descriptor.h`**: Header-only descriptor utilities
   - Uses `tcpx::plugin::loadMeta` as descriptor type (avoids duplication)
   - Provides `buildDescriptorBlock()` inline function
+  - `UnpackDescriptorBlock`: Container for unpack descriptors
+
+### Implementation
+- **`tcpx_impl.cc`**: TCPX plugin wrapper implementation
 
 ### Device Unpack (`device/`)
 - `unpack_kernels.cu`: CUDA kernels for GPU-side unpack (experimental)
@@ -245,24 +257,25 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 p2p/tcpx/
 ├── README.md                 # This file
 ├── Makefile                  # Build configuration
-├── tcpx_interface.h          # TCPX API interface
-├── tcpx_impl.cc              # TCPX plugin wrapper
-├── rx_descriptor.h           # Descriptor construction (header-only)
+├── tcpx_impl.cc              # TCPX plugin wrapper implementation
 ├── run_tcpx_test.sh          # Test runner script
-├── include/
-│   └── tcpx_structs.h        # TCPX plugin structures
+├── include/                  # Public headers (API)
+│   ├── tcpx_interface.h      # TCPX C API
+│   ├── tcpx_structs.h        # TCPX plugin structures
+│   └── rx_descriptor.h       # Descriptor construction (header-only)
 ├── device/                   # GPU kernels (not in this PR)
 │   ├── unpack_kernels.cu
 │   ├── unpack_launch.cu
 │   └── unpack_launch.h
 ├── tests/
 │   └── test_tcpx_transfer.cc # Integration test
-└── docs/                     # Additional documentation (not in PR)
-    ├── CHANGELOG.md
-    ├── PR_CHECKLIST.md
+└── docs/                     # Additional documentation
+    ├── STRUCTURE_MIGRATION.md
     ├── TCPX_LOGIC_MAPPING.md
     └── tcpx_transfer.md
 ```
+
+**Note**: All public headers are now in the `include/` directory for better organization and consistency.
 
 ---
 

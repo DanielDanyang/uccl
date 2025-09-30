@@ -27,9 +27,9 @@
  *     - kernel: CUDA kernel-based unpack (experimental, not in this PR)
  */
 
-#include "../tcpx_interface.h"
+#include "../include/tcpx_interface.h"
 #include "../include/tcpx_structs.h"
-#include "../rx_descriptor.h"
+#include "../include/rx_descriptor.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
