@@ -38,17 +38,12 @@ test_tcpx_transfer: $(DEVICE_OBJS)
 	@echo "Building test_tcpx_transfer..."
 	$(NVCC) $(NVCCFLAGS) -o tests/test_tcpx_transfer tests/test_tcpx_transfer.cc tcpx_impl.cc $(DEVICE_OBJS) $(LIBS) $(CUDA_LIBS)
 
-# Connection handshake test
-test_connection:
-	@echo "Building test_connection..."
-	$(CXX) $(CXXFLAGS) -o tests/test_connection tests/test_connection.cc tcpx_impl.cc $(LIBS) $(CUDA_LIBS)
-
-# Unit tests removed - rx module is now header-only and tested via integration tests
+# All unit tests and redundant tests removed - only integration test remains
 
 # Build targets
-all: core test_tcpx_transfer test_connection
+all: core test_tcpx_transfer
 
-# All tests (unit tests removed, only integration tests remain)
+# All tests (only integration test remains)
 all_tests: all
 
 # Quick test - just core components
@@ -74,9 +69,9 @@ check:
 clean:
 	@echo "Cleaning build artifacts..."
 	@echo "Removing executable files..."
-	rm -f tests/test_connection tests/test_tcpx_transfer
+	rm -f tests/test_tcpx_transfer
 	@echo "Removing object files..."
 	rm -f $(DEVICE_OBJS) *.o
 	@echo "Clean completed. Source files preserved."
 
-.PHONY: all core quick check clean all_tests test_tcpx_transfer test_connection
+.PHONY: all core quick check clean all_tests test_tcpx_transfer
