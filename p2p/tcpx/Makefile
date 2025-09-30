@@ -12,7 +12,7 @@ LIBS       := -ldl -lpthread
 CUDA_LIBS  := -L$(CUDA_HOME)/lib64 -lcuda -lcudart
 
 # Source files
-# Note: rx/rx_descriptor.h is now header-only, no .cc files needed
+# Note: rx_descriptor.h is now header-only, no .cc files needed
 DEVICE_SRCS := device/unpack_kernels.cu device/unpack_launch.cu
 
 # Object files
@@ -54,7 +54,7 @@ quick: core
 check:
 	@echo "=== File Check ==="
 	@echo "Core source files:"
-	@ls -la rx/*.h device/*.cu device/*.h 2>/dev/null || echo "Missing core files"
+	@ls -la rx_descriptor.h device/*.cu device/*.h 2>/dev/null || echo "Missing core files"
 	@echo ""
 	@echo "Implementation files:"
 	@ls -la tcpx_impl.cc tcpx_interface.h 2>/dev/null || echo "Missing implementation files"

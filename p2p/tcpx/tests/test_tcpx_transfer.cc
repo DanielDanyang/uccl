@@ -29,6 +29,7 @@
 
 #include "../tcpx_interface.h"
 #include "../include/tcpx_structs.h"
+#include "../rx_descriptor.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -40,7 +41,6 @@
 #include <cuda_runtime.h>
 
 #include "../device/unpack_launch.h"
-#include "../rx/rx_descriptor.h"
 
 #include <algorithm>
 #include <chrono>

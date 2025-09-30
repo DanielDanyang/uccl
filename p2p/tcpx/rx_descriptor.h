@@ -7,7 +7,7 @@
 #define TCPX_RX_DESCRIPTOR_H_
 
 #include <stdint.h>
-#include "../include/tcpx_structs.h"
+#include "include/tcpx_structs.h"
 
 namespace tcpx {
 namespace rx {
@@ -55,3 +55,4 @@ inline void buildDescriptorBlock(
 } // namespace tcpx
 
 #endif // TCPX_RX_DESCRIPTOR_H_
+
