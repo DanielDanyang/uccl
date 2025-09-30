@@ -10,13 +10,15 @@
 #include "../device/unpack_launch.h"
 
 // Forward declaration for device visibility barrier used by probe kernel
+namespace tcpx { namespace device {
 __device__ __forceinline__ void devmem_visibility_barrier(const void* flag_ptr);
+} }
 
 namespace tcpx {
 // Define a minimal staging kernel for debugging: read 1 byte and write to dst[0]
 extern "C" __global__ void tcpxUnpackKernelProbeByte(
     const tcpx::rx::UnpackDescriptorBlock* desc_block) {
-  if (threadIdx.x == 0) devmem_visibility_barrier(desc_block->ready_flag);
+  if (threadIdx.x == 0) device::devmem_visibility_barrier(desc_block->ready_flag);
   __syncthreads();
   if (blockIdx.x == 0 && threadIdx.x == 0 && desc_block->count > 0) {
     const tcpx::rx::UnpackDescriptor& d = desc_block->descriptors[0];
