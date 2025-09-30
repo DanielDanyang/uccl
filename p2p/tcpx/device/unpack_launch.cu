@@ -28,6 +28,7 @@ namespace device {
 
 UnpackLauncher::UnpackLauncher(const UnpackLaunchConfig& config)
   : config_(config), d_desc_block_(nullptr), d_desc_block_size_(0)
+  , d_staging_buffer_(nullptr), d_staging_buffer_size_(0)
   , start_event_(nullptr), stop_event_(nullptr), events_created_(false) {
 
   if (config_.enable_profiling) {
@@ -44,6 +45,9 @@ UnpackLauncher::UnpackLauncher(const UnpackLaunchConfig& config)
 UnpackLauncher::~UnpackLauncher() {
   if (d_desc_block_) {
     cudaFree(d_desc_block_);
+  }
+  if (d_staging_buffer_) {
+    cudaFree(d_staging_buffer_);
   }
 
   if (events_created_) {
@@ -76,37 +80,126 @@ int UnpackLauncher::launch(const tcpx::rx::UnpackDescriptorBlock& desc_block,
               << " bounce_buf=" << desc_block.bounce_buffer
               << " dst_buf=" << desc_block.dst_buffer
               << " ready_flag=" << desc_block.ready_flag << std::endl;
+    std::cout.flush();
   }
 
   // Copy descriptor block to device
-  if (dbg) std::cout << "[Debug Kernel] [launch] copyDescriptorBlockToDevice..." << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launch] copyDescriptorBlockToDevice..." << std::endl;
+    std::cout.flush();
+  }
 
   int ret = copyDescriptorBlockToDevice(desc_block);
+
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launch] copyDescriptorBlockToDevice rc=" << ret << std::endl;
+    std::cout.flush();
+  }
+
   if (ret < 0) {
     stats_.kernel_errors++;
-  if (dbg) std::cout << "[Debug Kernel] [launch] copyDescriptorBlockToDevice rc=" << ret << std::endl;
-
-  // Calculate launch parameters
-
     return ret;
   }
 
   // Calculate launch parameters
-  KernelLaunchParams params = calculateLaunchParams(desc_block);
-  if (!launch_utils::validateLaunchParams(params)) {
-  if (dbg) std::cerr << "[Debug Kernel] [launch] params: grid=" << params.grid_size.x
-                      << " block=" << params.block_size.x << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launch] calculateLaunchParams..." << std::endl;
+    std::cout.flush();
+  }
 
+  KernelLaunchParams params = calculateLaunchParams(desc_block);
+
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launch] params: grid=" << params.grid_size.x
+              << " block=" << params.block_size.x << std::endl;
+    std::cout.flush();
+  }
+
+  if (!launch_utils::validateLaunchParams(params)) {
     stats_.kernel_errors++;
     return -3;
   }
-  if (dbg) std::cout << "[Debug Kernel] [launch] params: grid=" << params.grid_size.x
-                      << " block=" << params.block_size.x << std::endl;
 
+
+  // Check if staging buffer is needed
+  const char* staging_env = std::getenv("UCCL_TCPX_USE_STAGING");
+  bool use_staging = (staging_env && std::string(staging_env) == "1");
+
+  if (use_staging) {
+    if (dbg) {
+      std::cout << "[Debug Kernel] [staging] Copying bounce->staging D2D..." << std::endl;
+      std::cout.flush();
+    }
+
+    // Ensure staging buffer is large enough
+    size_t required_staging = desc_block.total_bytes + 65536; // Add margin for alignment
+    if (d_staging_buffer_size_ < required_staging) {
+      if (d_staging_buffer_) {
+        cudaFree(d_staging_buffer_);
+      }
+      cudaError_t err = cudaMalloc(&d_staging_buffer_, required_staging);
+      if (err != cudaSuccess) {
+        if (dbg) {
+          std::cout << "[Debug Kernel] [staging] cudaMalloc failed: " << cudaGetErrorString(err) << std::endl;
+          std::cout.flush();
+        }
+        stats_.kernel_errors++;
+        return -5;
+      }
+      d_staging_buffer_size_ = required_staging;
+      if (dbg) {
+        std::cout << "[Debug Kernel] [staging] Allocated staging buffer: " << d_staging_buffer_
+                  << " size=" << required_staging << std::endl;
+        std::cout.flush();
+      }
+    }
+
+    // Copy bounce buffer to staging using D2D
+    cudaError_t err = cudaMemcpy(d_staging_buffer_, desc_block.bounce_buffer,
+                                  desc_block.total_bytes, cudaMemcpyDeviceToDevice);
+    if (err != cudaSuccess) {
+      if (dbg) {
+        std::cout << "[Debug Kernel] [staging] D2D copy failed: " << cudaGetErrorString(err) << std::endl;
+        std::cout.flush();
+      }
+      stats_.kernel_errors++;
+      return -6;
+    }
+
+    if (dbg) {
+      std::cout << "[Debug Kernel] [staging] D2D copy completed, modifying descriptors..." << std::endl;
+      std::cout.flush();
+    }
+
+    // Modify descriptor block to point to staging buffer
+    // We need to update the device-side descriptor block
+    tcpx::rx::UnpackDescriptorBlock modified_block = desc_block;
+    modified_block.bounce_buffer = d_staging_buffer_;
+
+    // Re-copy modified descriptor block to device
+    size_t required_size = sizeof(tcpx::rx::UnpackDescriptorBlock);
+    err = cudaMemcpy(d_desc_block_, &modified_block, required_size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+      if (dbg) {
+        std::cout << "[Debug Kernel] [staging] Modified desc H2D failed: " << cudaGetErrorString(err) << std::endl;
+        std::cout.flush();
+      }
+      stats_.kernel_errors++;
+      return -7;
+    }
+
+    if (dbg) {
+      std::cout << "[Debug Kernel] [staging] Ready to launch kernel with staging buffer" << std::endl;
+      std::cout.flush();
+    }
+  }
 
   // Start profiling if enabled
   float execution_time = 0.0f;
-  if (dbg) std::cout << "[Debug Kernel] [launch] launchKernel..." << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launch] launchKernel..." << std::endl;
+    std::cout.flush();
+  }
 
   if (config_.enable_profiling && events_created_) {
     cudaEventRecord(start_event_, stream);
@@ -114,7 +207,10 @@ int UnpackLauncher::launch(const tcpx::rx::UnpackDescriptorBlock& desc_block,
 
   // Launch kernel
   ret = launchKernel(params);
-  if (dbg) std::cout << "[Debug Kernel] [launch] launchKernel rc=" << ret << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launch] launchKernel rc=" << ret << std::endl;
+    std::cout.flush();
+  }
 
   if (ret < 0) {
     stats_.kernel_errors++;
@@ -138,11 +234,18 @@ int UnpackLauncher::launchSync(const tcpx::rx::UnpackDescriptorBlock& desc_block
   const bool dbg = (std::getenv("UCCL_TCPX_LAUNCH_DEBUG") && std::string(std::getenv("UCCL_TCPX_LAUNCH_DEBUG")) == "1");
   int ret = launch(desc_block);
   if (ret < 0) {
-    if (dbg) std::cout << "[Debug Kernel] [launchSync] launch rc=" << ret << std::endl;
+    if (dbg) {
+      std::cout << "[Debug Kernel] [launchSync] launch rc=" << ret << std::endl;
+      std::cout.flush();
+    }
     return ret;
   }
 
-  if (dbg) std::cout << "[Debug Kernel] [launchSync] waitForCompletion (stream sync)" << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launchSync] waitForCompletion (stream sync)" << std::endl;
+    std::cout.flush();
+  }
+
   if (dbg && config_.stream) {
     auto start = std::chrono::steady_clock::now();
     while (true) {
@@ -150,20 +253,25 @@ int UnpackLauncher::launchSync(const tcpx::rx::UnpackDescriptorBlock& desc_block
       if (q == cudaSuccess) break;
       if (q != cudaErrorNotReady) {
         std::cout << "[Debug Kernel] [launchSync] streamQuery error: " << cudaGetErrorString(q) << std::endl;
+        std::cout.flush();
         break;
       }
       auto now = std::chrono::steady_clock::now();
       auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (ms % 1000 < 50) {
         std::cout << "[Debug Kernel] [launchSync] still waiting... elapsed_ms=" << ms << std::endl;
+        std::cout.flush();
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
   }
 
   cudaError_t err = waitForCompletion();
-  if (dbg) std::cout << "[Debug Kernel] [launchSync] waitForCompletion rc=" << (int)err
-                      << " (" << cudaGetErrorString(err) << ")" << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [launchSync] waitForCompletion rc=" << (int)err
+              << " (" << cudaGetErrorString(err) << ")" << std::endl;
+    std::cout.flush();
+  }
   return (err == cudaSuccess) ? 0 : -4;
 }
 
@@ -218,8 +326,12 @@ int UnpackLauncher::copyDescriptorBlockToDevice(
   }
 
   const bool dbg = (std::getenv("UCCL_TCPX_LAUNCH_DEBUG") && std::string(std::getenv("UCCL_TCPX_LAUNCH_DEBUG")) == "1");
-  if (dbg) std::cout << "[Debug Kernel] [copy] H2D desc_block required_size=" << required_size
-                      << " stream=" << config_.stream << std::endl;
+  if (dbg) {
+    std::cout << "[Debug Kernel] [copy] H2D desc_block required_size=" << required_size
+              << " stream=" << config_.stream << std::endl;
+    std::cout.flush();
+  }
+
   cudaError_t err;
   if (config_.stream) {
     err = cudaMemcpyAsync(d_desc_block_, &desc_block, required_size,
@@ -228,8 +340,13 @@ int UnpackLauncher::copyDescriptorBlockToDevice(
     err = cudaMemcpy(d_desc_block_, &desc_block, required_size,
                      cudaMemcpyHostToDevice);
   }
-  if (dbg) std::cout << "[Debug Kernel] [copy] H2D rc=" << (int)err
-                      << " (" << cudaGetErrorString(err) << ")" << std::endl;
+
+  if (dbg) {
+    std::cout << "[Debug Kernel] [copy] H2D rc=" << (int)err
+              << " (" << cudaGetErrorString(err) << ")" << std::endl;
+    std::cout.flush();
+  }
+
   if (err != cudaSuccess) {
     return -2;
   }
@@ -239,8 +356,8 @@ int UnpackLauncher::copyDescriptorBlockToDevice(
 
 KernelLaunchParams UnpackLauncher::calculateLaunchParams(
     const tcpx::rx::UnpackDescriptorBlock& desc_block) const {
-
-  return calculateLaunchParams(desc_block);
+  // Call the global function declared in extern "C" block
+  return ::calculateLaunchParams(desc_block);
 }
 
 int UnpackLauncher::launchKernel(const KernelLaunchParams& params) {

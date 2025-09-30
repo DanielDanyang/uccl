@@ -104,6 +104,8 @@ private:
   // Device memory management
   void* d_desc_block_;          // Device descriptor block
   size_t d_desc_block_size_;    // Allocated size
+  void* d_staging_buffer_;      // Staging buffer for devmem-tcp workaround
+  size_t d_staging_buffer_size_; // Staging buffer allocated size
   
   // Profiling events
   cudaEvent_t start_event_;
