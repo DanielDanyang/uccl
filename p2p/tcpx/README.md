@@ -168,26 +168,14 @@ Client                          Server
 ---
 ## Components
 
-### Public Headers (`include/`)
-All public API headers are in the `include/` directory:
+### TCPX Interface Layer
+- `tcpx_interface.h`: C API definitions
+- `tcpx_impl.cc`: TCPX plugin wrapper implementation
 
-- **`tcpx_interface.h`**: TCPX C API definitions
-  - Connection management (listen, accept, connect)
-  - Memory registration (regMr, deregMr)
-  - Data transfer operations (isend, irecv, test)
-
-- **`tcpx_structs.h`**: TCPX plugin structure definitions
-  - `loadMeta`: Fragment descriptor (src_off, len, dst_off)
-  - `tcpxRequest`: Request handle structure
-  - `unpackSlot`: RX metadata slot
-
-- **`rx_descriptor.h`**: Header-only descriptor utilities
+### RX Descriptor Module
+- `rx_descriptor.h`: Header-only descriptor construction utilities
   - Uses `tcpx::plugin::loadMeta` as descriptor type (avoids duplication)
   - Provides `buildDescriptorBlock()` inline function
-  - `UnpackDescriptorBlock`: Container for unpack descriptors
-
-### Implementation
-- **`tcpx_impl.cc`**: TCPX plugin wrapper implementation
 
 ### Device Unpack (`device/`)
 - `unpack_kernels.cu`: CUDA kernels for GPU-side unpack (experimental)
@@ -249,33 +237,6 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 - Check GPU memory is not corrupted
 - Verify CUDA driver version compatibility
 
----
-
-## File Structure
-
-```
-p2p/tcpx/
-├── README.md                 # This file
-├── Makefile                  # Build configuration
-├── tcpx_impl.cc              # TCPX plugin wrapper implementation
-├── run_tcpx_test.sh          # Test runner script
-├── include/                  # Public headers (API)
-│   ├── tcpx_interface.h      # TCPX C API
-│   ├── tcpx_structs.h        # TCPX plugin structures
-│   └── rx_descriptor.h       # Descriptor construction (header-only)
-├── device/                   # GPU kernels (not in this PR)
-│   ├── unpack_kernels.cu
-│   ├── unpack_launch.cu
-│   └── unpack_launch.h
-├── tests/
-│   └── test_tcpx_transfer.cc # Integration test
-└── docs/                     # Additional documentation
-    ├── STRUCTURE_MIGRATION.md
-    ├── TCPX_LOGIC_MAPPING.md
-    └── tcpx_transfer.md
-```
-
-**Note**: All public headers are now in the `include/` directory for better organization and consistency.
 
 ---
 
@@ -305,33 +266,8 @@ struct loadMeta {
 - **Destination buffers**: Application allocated via `cudaMalloc`
 - **Descriptor blocks**: Host-side structures for unpack operations
 
-### Design Decisions
-
-1. **Unified descriptor type**: Uses `tcpx::plugin::loadMeta` directly
-   - Avoids structure duplication
-   - Maintains compatibility with TCPX plugin
-   - Reduces maintenance overhead
-
-2. **Header-only RX module**: No separate `.cc` file needed
-   - Faster compilation
-   - Simpler dependency management
-
-3. **Removed over-engineering**: Eliminated unnecessary abstractions
-   - No `CmsgParser` class (TCPX plugin handles CMSG parsing)
-   - No `DescriptorBuilder` class (simple inline function suffices)
-   - Result: **95% code reduction** in RX module
-
 ---
 
-## Performance
-
-| Mode | Latency | Bandwidth | Use Case |
-|------|---------|-----------|----------|
-| D2D | Low | High | Production (recommended) |
-| Host | High | Low | Debugging/validation |
-| Kernel | Lowest | Highest | Future optimization |
-
----
 
 ## Known Limitations
 
@@ -341,23 +277,9 @@ struct loadMeta {
 
 ---
 
-## Future Work
-
-- Resolve kernel mode devmem-tcp access issues
-- Optimize multi-fragment transfers
-- Add performance benchmarking suite
-- Integrate with UCCL engine layer
-
----
 
 ## References
 
 - [nccl-plugin-gpudirecttcpx](https://github.com/google/nccl-plugin-gpudirecttcpx)
-- [NCCL Plugin API v7](https://github.com/NVIDIA/nccl/blob/master/src/include/net.h)
 - [Linux devmem-tcp](https://lwn.net/Articles/945687/)
 
----
-
-## License
-
-See LICENSE.txt for license information.

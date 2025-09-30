@@ -1,8 +1,14 @@
-/*************************************************************************
- * Copyright (c) 2024, UCCL Project. All rights reserved.
+/**
+ * @file rx_descriptor.h
+ * @brief RX descriptor construction utilities (header-only)
  *
- * See LICENSE.txt for license information
- ************************************************************************/
+ * Builds GPU unpack descriptors from TCPX receive metadata.
+ * After a GPU receive completes, the plugin provides scatter-gather metadata
+ * (loadMeta array) describing how to unpack fragmented data from bounce buffers.
+ *
+ * Design: Header-only, uses tcpx::plugin::loadMeta directly (no duplication).
+ */
+
 #ifndef TCPX_RX_DESCRIPTOR_H_
 #define TCPX_RX_DESCRIPTOR_H_
 
@@ -33,7 +39,19 @@ struct UnpackDescriptorBlock {
     , ready_flag(nullptr), ready_threshold(0) {}
 };
 
-// Simple utility function to build descriptor block from loadMeta array
+/**
+ * @brief Build descriptor block from TCPX receive metadata
+ * @param meta_entries Array of loadMeta from rx_req->unpack_slot.mem
+ * @param count Number of descriptors
+ * @param bounce_buffer Bounce buffer base address (from device handle)
+ * @param dst_buffer Destination buffer base address
+ * @param desc_block Output descriptor block
+ *
+ * Copies descriptors and calculates total_bytes. Can be used for:
+ * - D2D unpack: Loop and call cuMemcpyDtoD per fragment
+ * - Host unpack: DtoH + gather + HtoD
+ * - Kernel unpack: Copy to device and launch GPU kernel
+ */
 inline void buildDescriptorBlock(
     const tcpx::plugin::loadMeta* meta_entries,
     uint32_t count,

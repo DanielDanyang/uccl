@@ -1,4 +1,14 @@
-#include "include/tcpx_interface.h"
+/**
+ * @file tcpx_impl.cc
+ * @brief TCPX plugin wrapper implementation
+ *
+ * Provides C API wrapper around NCCL GPUDirect TCPX plugin.
+ * - Dynamic plugin loading via dlopen
+ * - Thin wrappers with error checking and debug logging
+ * - Debug logging controlled by UCCL_TCPX_DEBUG environment variable
+ */
+
+#include "tcpx_interface.h"
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
@@ -7,11 +17,15 @@
 #include <cstring>
 #include <dlfcn.h>
 
-// Debug helper controlled by UCCL_TCPX_DEBUG
+//=============================================================================
+// Debug Logging
+//=============================================================================
+
 static bool tcpx_debug_enabled() {
   char const* v = std::getenv("UCCL_TCPX_DEBUG");
   return v && *v && *v != '0';
 }
+
 static void tcpx_dbg(char const* fmt, ...) {
   if (!tcpx_debug_enabled()) return;
   va_list ap;
@@ -22,7 +36,7 @@ static void tcpx_dbg(char const* fmt, ...) {
   va_end(ap);
 }
 
-// Safe logger for NCCL net plugin init
+// Logger callback for NCCL plugin init
 static int nccl_debug_logger(int level, char const* abbrev, char const* file,
                              int line, char const* fmt, ...) {
   if (!tcpx_debug_enabled()) return 0;
@@ -35,8 +49,12 @@ static int nccl_debug_logger(int level, char const* abbrev, char const* file,
   return 0;
 }
 
-// Minimal NCCL net v7-like table (only members we use)
+//=============================================================================
+// NCCL Plugin Function Table (v7 API)
+//=============================================================================
+
 typedef int (*ncclLogFn)(int, char const*, char const*, int, char const*, ...);
+
 struct ncclNet_v7 {
   char const* name;
   int (*init)(ncclLogFn);
@@ -59,10 +77,17 @@ struct ncclNet_v7 {
   int (*irecvConsumed)(void*, int, void*);
 };
 
-// globals
-static void* g_plugin_handle = nullptr;
-static ncclNet_v7* g_net = nullptr;
-static int g_inited = 0;
+//=============================================================================
+// Global State
+//=============================================================================
+
+static void* g_plugin_handle = nullptr;  // Plugin shared library handle
+static ncclNet_v7* g_net = nullptr;      // Plugin function table
+static int g_inited = 0;                 // Initialization flag
+
+//=============================================================================
+// Helper Functions
+//=============================================================================
 
 static void* resolve_symbol(void* handle, char const* sym) {
   dlerror();
@@ -74,6 +99,10 @@ static void* resolve_symbol(void* handle, char const* sym) {
   }
   return p;
 }
+
+//=============================================================================
+// Plugin Initialization
+//=============================================================================
 
 int tcpx_load_plugin(char const* plugin_path) {
   tcpx_dbg("Loading plugin: %s", plugin_path);
