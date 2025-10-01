@@ -18,8 +18,12 @@ namespace tcpx {
 // Define a minimal staging kernel for debugging: read 1 byte and write to dst[0]
 extern "C" __global__ void tcpxUnpackKernelProbeByte(
     const tcpx::rx::UnpackDescriptorBlock* desc_block) {
-  if (threadIdx.x == 0) device::devmem_visibility_barrier(desc_block->ready_flag);
-  __syncthreads();
+  // Only thread 0 does the visibility load, but all threads must sync
+  if (threadIdx.x == 0) {
+    device::devmem_visibility_barrier(desc_block->ready_flag);
+  }
+  __syncthreads();  // All threads sync here
+
   if (blockIdx.x == 0 && threadIdx.x == 0 && desc_block->count > 0) {
     const tcpx::rx::UnpackDescriptor& d = desc_block->descriptors[0];
     const char* src = static_cast<const char*>(desc_block->bounce_buffer) + d.src_off;
@@ -117,6 +121,7 @@ void st_global<16>(uintptr_t addr, BytePack<16> val) {
 #define WARP_SIZE 32
 
 // Device-side visibility barrier similar to NCCL load64gpu on cnt
+// NOTE: This function does NOT include __syncthreads() - caller must sync if needed
 __device__ __forceinline__ void devmem_visibility_barrier(const void* flag_ptr) {
   if (!flag_ptr) return;
 #if __CUDA_ARCH__ >= 700
@@ -126,17 +131,18 @@ __device__ __forceinline__ void devmem_visibility_barrier(const void* flag_ptr) 
   volatile unsigned long long* p = (volatile unsigned long long*)flag_ptr;
   (void)*p;
 #endif
-  __syncthreads();
 }
 
 // Bulk copy template (adapted from NCCL)
+// IMPORTANT: Loop condition must match NCCL exactly: data_s + DATA_LOAD_SIZE - 1 < len
 template<int BYTES>
 __device__ void bulkCopy(int tid, uint32_t len, char* src, char* dst) {
   const int elements_per_thread = DATA_LOAD_SIZE / BYTES;
   BytePack<BYTES> reg[elements_per_thread];
 
+  // Match NCCL's loop condition exactly
   for (uint32_t offset = tid * DATA_LOAD_SIZE;
-       offset + DATA_LOAD_SIZE <= len;
+       offset + DATA_LOAD_SIZE - 1 < len;  // Fixed: was "offset + DATA_LOAD_SIZE <= len"
        offset += WARP_SIZE * DATA_LOAD_SIZE) {
 
     // Load data
@@ -156,6 +162,7 @@ __device__ void bulkCopy(int tid, uint32_t len, char* src, char* dst) {
 }
 
 // Single descriptor unpack kernel
+// Matches NCCL logic from unpack.h:251-275
 __device__ void unpackSingleDescriptor(
     int tid,
     const tcpx::rx::UnpackDescriptor& desc,
@@ -166,11 +173,13 @@ __device__ void unpackSingleDescriptor(
   char* dst = dst_buffer + desc.dst_off;
   uint32_t len = desc.len;
 
+  // Fast path for data >= 16 bytes (matches NCCL line 251)
   if (len >= DATA_LOAD_SIZE) {
-    // Determine optimal alignment for vectorized access
+    // Determine optimal alignment for vectorized access (matches NCCL line 255-256)
     uint8_t align_off = (desc.src_off | desc.dst_off) % DATA_LOAD_SIZE;
     align_off = align_off & (-align_off);  // Keep lowest bit
 
+    // Select bulk copy size based on alignment (matches NCCL line 257-267)
     if (align_off == 0) {
       bulkCopy<16>(tid, len, src, dst);
     } else if (align_off & 0x8) {
@@ -184,7 +193,10 @@ __device__ void unpackSingleDescriptor(
     }
   }
 
-  // Handle remaining bytes (< DATA_LOAD_SIZE)
+  // Handle remaining bytes (< DATA_LOAD_SIZE) (matches NCCL line 271-275)
+  // This handles both:
+  // 1. Tail bytes after bulk copy (e.g., 23 bytes = 16 bulk + 7 tail)
+  // 2. Entire payload if len < 16 (e.g., 7 bytes = 0 bulk + 7 tail)
   uint32_t remaining_start = (len / DATA_LOAD_SIZE) * DATA_LOAD_SIZE;
   if (tid < len % DATA_LOAD_SIZE) {
     volatile char* src_ptr = src + remaining_start + tid;
@@ -201,8 +213,11 @@ extern "C" __global__ void tcpxUnpackKernel(
   int bid = blockIdx.x;
 
   // Issue a device-side visibility barrier before reading bounce buffer
-  if (tid == 0) devmem_visibility_barrier(desc_block->ready_flag);
-  __syncthreads();
+  // Only thread 0 does the visibility load, but all threads must sync
+  if (tid == 0) {
+    devmem_visibility_barrier(desc_block->ready_flag);
+  }
+  __syncthreads();  // All threads sync here
 
   char* bounce_buffer = static_cast<char*>(desc_block->bounce_buffer);
   char* dst_buffer = static_cast<char*>(desc_block->dst_buffer);
@@ -215,6 +230,9 @@ extern "C" __global__ void tcpxUnpackKernel(
 }
 
 // Optimized kernel for small descriptors (single warp per descriptor)
+// Note: Unlike NCCL which has warps process multiple descriptors in a loop,
+// we assign one warp per descriptor. No inter-warp sync needed since each
+// warp works on independent memory regions (different dst_off ranges).
 extern "C" __global__ void tcpxUnpackKernelSmall(
     const tcpx::rx::UnpackDescriptorBlock* desc_block) {
 
@@ -223,13 +241,17 @@ extern "C" __global__ void tcpxUnpackKernelSmall(
   int lane_id = tid % WARP_SIZE;
 
   // Issue a device-side visibility barrier before reading bounce buffer
-  if (threadIdx.x == 0) devmem_visibility_barrier(desc_block->ready_flag);
-  __syncthreads();
+  // Only thread 0 in each block does the visibility load, but all threads must sync
+  if (threadIdx.x == 0) {
+    devmem_visibility_barrier(desc_block->ready_flag);
+  }
+  __syncthreads();  // All threads in block sync here
 
   char* bounce_buffer = static_cast<char*>(desc_block->bounce_buffer);
   char* dst_buffer = static_cast<char*>(desc_block->dst_buffer);
 
   // Each warp processes one descriptor
+  // No sync needed after processing since descriptors have non-overlapping dst_off ranges
   if (warp_id < desc_block->count) {
     const tcpx::rx::UnpackDescriptor& desc = desc_block->descriptors[warp_id];
     unpackSingleDescriptor(lane_id, desc, bounce_buffer, dst_buffer);
