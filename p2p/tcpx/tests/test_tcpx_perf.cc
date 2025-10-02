@@ -257,6 +257,29 @@ int main(int argc, char** argv) {
     }
     std::cout << "[PERF][SERVER] Recv buffer registered successfully, mhandle=" << recv_mhandle << std::endl;
 
+    // Create stream and launcher once (outside the loop) for kernel mode
+    cudaStream_t unpack_stream = nullptr;
+    tcpx::device::UnpackLauncher* launcher_ptr = nullptr;
+
+    if (!use_host_recv && impl == "kernel") {
+      if (cudaStreamCreate(&unpack_stream) != cudaSuccess) {
+        std::cerr << "[ERROR] Failed to create unpack stream" << std::endl;
+        if (h_recv_base) cudaFreeHost(h_recv_base);
+        if (d_base) cuMemFree(d_base);
+        tcpx_dereg_mr(recv_comm, recv_mhandle);
+        tcpx_close_recv(recv_comm);
+        tcpx_close_listen(listen_comm);
+        close(bootstrap_fd);
+        return 1;
+      }
+      tcpx::device::UnpackLaunchConfig cfg;
+      cfg.stream = unpack_stream;
+      cfg.enable_profiling = false;
+      cfg.use_small_kernel = true;
+      launcher_ptr = new tcpx::device::UnpackLauncher(cfg);
+      std::cout << "[PERF][SERVER] Created persistent stream and launcher for kernel mode" << std::endl;
+    }
+
     double total_time_ms = 0.0;
 
     for (int iter = 0; iter < iterations; ++iter) {
@@ -331,20 +354,10 @@ int main(int argc, char** argv) {
 
           int lrc = 0;
           if (impl == "kernel") {
-            cudaStream_t stream;
-            if (cudaStreamCreate(&stream) != cudaSuccess) {
-              std::cerr << "[ERROR] Failed to create stream" << std::endl;
-              break;
-            }
-            tcpx::device::UnpackLaunchConfig cfg;
-            cfg.stream = stream;
-            cfg.enable_profiling = false;
-            cfg.use_small_kernel = true;
-            tcpx::device::UnpackLauncher launcher(cfg);
-            lrc = launcher.launchSync(desc_block);
-            cudaStreamDestroy(stream);
+            // Use persistent launcher with async launch (no sync here!)
+            lrc = launcher_ptr->launch(desc_block);
             if (lrc != 0) {
-              std::cerr << "[ERROR] Unpack kernel failed: " << lrc << std::endl;
+              std::cerr << "[ERROR] Unpack kernel launch failed: " << lrc << std::endl;
               break;
             }
           } else if (impl == "d2d") {
@@ -388,6 +401,15 @@ int main(int argc, char** argv) {
         }
       }
 
+      // Sync stream once per iteration (after all chunks) for kernel mode
+      if (!use_host_recv && impl == "kernel") {
+        cudaError_t err = cudaStreamSynchronize(unpack_stream);
+        if (err != cudaSuccess) {
+          std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
+          break;
+        }
+      }
+
       auto end = std::chrono::high_resolution_clock::now();
       double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
       total_time_ms += iter_time_ms;
@@ -399,6 +421,16 @@ int main(int argc, char** argv) {
 
     std::cout << "[PERF] Avg: " << std::fixed << std::setprecision(3) << avg_ms << " ms, "
               << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
+
+    // Cleanup persistent launcher and stream
+    if (launcher_ptr) {
+      delete launcher_ptr;
+      launcher_ptr = nullptr;
+    }
+    if (unpack_stream) {
+      cudaStreamDestroy(unpack_stream);
+      unpack_stream = nullptr;
+    }
 
     tcpx_dereg_mr(recv_comm, recv_mhandle);
     if (h_recv_base) cudaFreeHost(h_recv_base);
