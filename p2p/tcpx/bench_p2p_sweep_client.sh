@@ -33,7 +33,7 @@ shift 2 || true
 
 # Defaults
 IFACES="eth1,eth2,eth3,eth4"
-CTRL_DEV="eth1"
+CTRL_DEV="eth0"  # Control network (eth0), data networks (eth1-4)
 SIZES=""
 ITERS="auto"
 CHUNK=$((512*1024))

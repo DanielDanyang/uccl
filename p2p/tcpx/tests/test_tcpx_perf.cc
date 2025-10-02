@@ -21,7 +21,7 @@
  * 【环境变量】
  *   UCCL_TCPX_PERF_SIZE: 每次迭代传输的总字节数（默认 4MB）
  *   UCCL_TCPX_PERF_ITERS: 迭代次数（默认 10）
- *   UCCL_TCPX_CHUNK_BYTES: 每个 chunk 的大小（默认 512KB）
+ *   UCCL_TCPX_CHUNK_BYTES: 每个 chunk 的大小（默认 2MB，优化后从 512KB 增加）
  *   UCCL_TCPX_UNPACK_IMPL: 解包实现方式（kernel|d2d|host，默认 kernel）
  */
 
@@ -199,10 +199,11 @@ int main(int argc, char** argv) {
   // 迭代次数（用于计算平均性能）
   int iterations = getEnvInt("UCCL_TCPX_PERF_ITERS", 10);
 
-  // Chunk 大小：优先使用 UCCL_TCPX_CHUNK_BYTES，其次 NCCL_P2P_NET_CHUNKSIZE，默认 512KB
+  // Chunk 大小：优先使用 UCCL_TCPX_CHUNK_BYTES，其次 NCCL_P2P_NET_CHUNKSIZE，默认 2MB
   // 【重要】Chunk 机制用于避免单次传输过大导致 TCPX bounce buffer 压力过大
+  // 【优化】从 512KB 增加到 2MB，减少 chunk 数量，降低固定开销
   size_t chunk_bytes = getEnvSize("UCCL_TCPX_CHUNK_BYTES",
-                                   getEnvSize("NCCL_P2P_NET_CHUNKSIZE", 512 * 1024));
+                                   getEnvSize("NCCL_P2P_NET_CHUNKSIZE", 2 * 1024 * 1024));
 
   // 限制最大传输大小
   if (test_size > kMaxSize) test_size = kMaxSize;
@@ -489,8 +490,7 @@ int main(int argc, char** argv) {
 
       // 每次迭代开始时重置滑动窗口状态
       if (!use_host_recv && impl == "kernel") {
-        std::cout << "[DEBUG] Iteration " << iter << " start: clearing sliding window (was "
-                  << pending_reqs.size() << " pending)" << std::endl;
+        // [DEBUG] Iteration start: clearing sliding window (removed for performance)
         pending_reqs.clear();
         pending_indices.clear();
       }
@@ -520,6 +520,48 @@ int main(int argc, char** argv) {
                   << " size=" << this_chunk << " offset=" << offset << std::endl;
 
         // ======================================================================
+        // 【修复】滑动窗口检查 - 必须在 tcpx_irecv 之前！
+        // ======================================================================
+
+        // 【问题】TCPX 插件每个 comm 只有 16 个请求槽
+        // 如果同时有超过 16 个 irecv 请求未调用 irecv_consumed，会报错
+        //
+        // 【解决方案】在发起新的 irecv 之前，检查滑动窗口是否已满
+        // 如果满了，先等待最老的 chunk 完成并释放请求槽
+
+        if (!use_host_recv && impl == "kernel") {
+          if (pending_reqs.size() >= MAX_INFLIGHT) {
+            // 获取最老的 chunk 的索引和 event
+            int oldest_idx = pending_indices.front();
+            cudaEvent_t oldest_event = events[oldest_idx % MAX_INFLIGHT];
+
+            // [DEBUG] Sliding window FULL (removed for performance)
+
+            // 【关键】等待最老的 chunk 的 kernel 完成
+            cudaError_t err = cudaEventSynchronize(oldest_event);
+            if (err != cudaSuccess) {
+              std::cerr << "[ERROR] cudaEventSynchronize (pre-irecv) failed: "
+                        << cudaGetErrorString(err) << std::endl;
+              break;
+            }
+
+            // 【关键】释放最老的 chunk 的 TCPX 请求槽
+            void* oldest_req = pending_reqs.front();
+            // int oldest_chunk_idx = pending_indices.front();  // Unused after removing debug logs
+
+            // [DEBUG] Releasing TCPX request (removed for performance)
+
+            tcpx_irecv_consumed(recv_comm, 1, oldest_req);
+
+            // 从滑动窗口中移除最老的 chunk
+            pending_reqs.erase(pending_reqs.begin());
+            pending_indices.erase(pending_indices.begin());
+
+            // [DEBUG] Request released (removed for performance)
+          }
+        }
+
+        // ======================================================================
         // 发起异步接收（tcpx_irecv）
         // ======================================================================
 
@@ -539,9 +581,7 @@ int main(int argc, char** argv) {
           break;
         }
 
-        // 【调试】记录成功的 irecv 调用
-        std::cout << "[DEBUG] tcpx_irecv success: chunk_idx=" << chunk_idx
-                  << " tag=" << tag << " request=" << recv_request << std::endl;
+        // [DEBUG] tcpx_irecv success (removed for performance)
 
         // ======================================================================
         // 轮询等待接收完成（tcpx_test）
@@ -630,48 +670,9 @@ int main(int argc, char** argv) {
             // ==================================================================
 
             // ----------------------------------------------------------------
-            // 【滑动窗口核心逻辑 - 避免耗尽 TCPX 请求池】
+            // 【注意】滑动窗口检查已经移到 tcpx_irecv 之前（第 530-565 行）
             // ----------------------------------------------------------------
-
-            // 【问题】TCPX 插件每个 comm 只有 16 个请求槽
-            // 如果同时有超过 16 个 irecv 请求未调用 irecv_consumed，会报错
-            //
-            // 【解决方案】滑动窗口：
-            // 1. 当窗口满（pending_reqs.size() >= MAX_INFLIGHT）时
-            // 2. 等待最老的 chunk 的 kernel 完成（cudaEventSynchronize）
-            // 3. 调用 tcpx_irecv_consumed 释放该 chunk 的请求槽
-            // 4. 从窗口中移除该 chunk
-            // 5. 然后才能发起新的 irecv
-
-            if (pending_reqs.size() >= MAX_INFLIGHT) {
-              // 获取最老的 chunk 的索引和 event
-              int oldest_idx = pending_indices.front();
-              cudaEvent_t oldest_event = events[oldest_idx % MAX_INFLIGHT];
-
-              // 【关键】等待最老的 chunk 的 kernel 完成
-              // 这确保了 bounce buffer 的数据已经被拷贝到目标内存
-              cudaError_t err = cudaEventSynchronize(oldest_event);
-              if (err != cudaSuccess) {
-                std::cerr << "[ERROR] cudaEventSynchronize failed: " << cudaGetErrorString(err) << std::endl;
-                break;
-              }
-
-              // 【关键】释放最老的 chunk 的 TCPX 请求槽
-              // 这告诉 TCPX 插件：我已经处理完这个请求，可以重用这个槽了
-              void* oldest_req = pending_reqs.front();
-              int oldest_chunk_idx = pending_indices.front();
-
-              std::cout << "[DEBUG] Releasing TCPX request: chunk_idx=" << oldest_chunk_idx
-                        << " request=" << oldest_req << " pending_before=" << pending_reqs.size() << std::endl;
-
-              tcpx_irecv_consumed(recv_comm, 1, oldest_req);
-
-              // 从滑动窗口中移除最老的 chunk
-              pending_reqs.erase(pending_reqs.begin());
-              pending_indices.erase(pending_indices.begin());
-
-              std::cout << "[DEBUG] Request released: pending_after=" << pending_reqs.size() << std::endl;
-            }
+            // 这样可以确保在发起新的 irecv 之前，TCPX 请求池有可用的槽位
 
             // ----------------------------------------------------------------
             // 启动当前 chunk 的 unpack kernel
@@ -790,14 +791,14 @@ int main(int argc, char** argv) {
       // 必须等待它们全部完成并释放请求槽，否则会泄漏资源
 
       if (!use_host_recv && impl == "kernel") {
-        std::cout << "[DEBUG] Draining sliding window: " << pending_reqs.size() << " pending requests" << std::endl;
+        // [DEBUG] Draining sliding window (removed for performance)
 
         while (!pending_reqs.empty()) {
           // 获取最老的 chunk
           int oldest_idx = pending_indices.front();
           cudaEvent_t oldest_event = events[oldest_idx % MAX_INFLIGHT];
 
-          std::cout << "[DEBUG] Waiting for chunk " << oldest_idx << " (event_idx=" << (oldest_idx % MAX_INFLIGHT) << ")" << std::endl;
+          // [DEBUG] Waiting for chunk (removed for performance)
 
           // 等待 kernel 完成
           cudaError_t err = cudaEventSynchronize(oldest_event);
@@ -815,7 +816,7 @@ int main(int argc, char** argv) {
           pending_indices.erase(pending_indices.begin());
         }
 
-        std::cout << "[DEBUG] Sliding window drained, remaining: " << pending_reqs.size() << std::endl;
+        // [DEBUG] Sliding window drained (removed for performance)
       }
 
       // ========================================================================
@@ -1074,7 +1075,7 @@ int main(int argc, char** argv) {
       // 【重要】在迭代结束时，滑动窗口中可能还有未完成的 send 请求
       // 必须等待它们全部完成，确保所有数据都已发送
 
-      std::cout << "[DEBUG] Draining client sliding window: " << pending_send_reqs.size() << " pending send requests" << std::endl;
+      // [DEBUG] Draining client sliding window (removed for performance)
 
       while (!pending_send_reqs.empty()) {
         void* oldest_req = pending_send_reqs.front();
@@ -1090,7 +1091,7 @@ int main(int argc, char** argv) {
         pending_send_reqs.erase(pending_send_reqs.begin());
       }
 
-      std::cout << "[DEBUG] Client sliding window drained, remaining: " << pending_send_reqs.size() << std::endl;
+      // [DEBUG] Client sliding window drained (removed for performance)
 
       // ========================================================================
       // 计算本次迭代的性能
