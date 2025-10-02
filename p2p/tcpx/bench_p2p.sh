@@ -28,10 +28,10 @@ Options:
   --skip-warmup=N         Skip first N iter(s) in steady-state stats (default: 1)
 
 Examples:
-  # Node1
+  # Node1 (Server: 10.65.74.150)
   ./bench_p2p.sh server 0 --ifaces=eth1,eth2,eth3,eth4 --unix-prefix=/tmp/uccl_perf
-  # Node2
-  ./bench_p2p.sh client 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --unix-prefix=/tmp/uccl_perf
+  # Node2 (Client: 10.64.113.77)
+  ./bench_p2p.sh client 10.65.74.150 0 --ifaces=eth1,eth2,eth3,eth4 --unix-prefix=/tmp/uccl_perf
 EOF
 }
 

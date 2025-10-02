@@ -22,7 +22,7 @@ Options:
   --skip-warmup=N    Skip first N iter(s) for steady-state calc (default: 1)
 
 Example:
-  ./bench_p2p_sweep_client.sh 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
+  ./bench_p2p_sweep_client.sh 10.65.74.150 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
 EOF
 }
 
