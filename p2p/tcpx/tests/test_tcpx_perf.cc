@@ -260,6 +260,7 @@ int main(int argc, char** argv) {
     // Create stream and launcher once (outside the loop) for kernel mode
     cudaStream_t unpack_stream = nullptr;
     tcpx::device::UnpackLauncher* launcher_ptr = nullptr;
+    std::vector<void*> pending_reqs;  // defer irecv_consumed for kernel mode until stream sync
 
     if (!use_host_recv && impl == "kernel") {
       if (cudaStreamCreate(&unpack_stream) != cudaSuccess) {
@@ -396,7 +397,12 @@ int main(int argc, char** argv) {
             }
           }
 
-          tcpx_irecv_consumed(recv_comm, 1, recv_request);
+          // Defer consume for kernel (async) until stream sync; immediate for others
+          if (impl == "kernel") {
+            pending_reqs.push_back(recv_request);
+          } else {
+            tcpx_irecv_consumed(recv_comm, 1, recv_request);
+          }
           offset += this_chunk;
         }
       }
@@ -408,6 +414,11 @@ int main(int argc, char** argv) {
           std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
           break;
         }
+        // Now it is safe to release bounce buffers for all kernel chunks
+        for (void* req_ptr : pending_reqs) {
+          tcpx_irecv_consumed(recv_comm, 1, req_ptr);
+        }
+        pending_reqs.clear();
       }
 
       auto end = std::chrono::high_resolution_clock::now();
