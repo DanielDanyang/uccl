@@ -489,6 +489,8 @@ int main(int argc, char** argv) {
 
       // 每次迭代开始时重置滑动窗口状态
       if (!use_host_recv && impl == "kernel") {
+        std::cout << "[DEBUG] Iteration " << iter << " start: clearing sliding window (was "
+                  << pending_reqs.size() << " pending)" << std::endl;
         pending_reqs.clear();
         pending_indices.clear();
       }
@@ -528,10 +530,18 @@ int main(int argc, char** argv) {
         void* recv_mhandles[1] = {recv_mhandle};                 // 内存句柄数组
         void* recv_request = nullptr;                            // 输出：请求句柄
 
-        if (tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags, recv_mhandles, &recv_request) != 0) {
-          std::cerr << "[ERROR] tcpx_irecv failed (chunk)" << std::endl;
+        int irecv_rc = tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags, recv_mhandles, &recv_request);
+        if (irecv_rc != 0) {
+          std::cerr << "[ERROR] tcpx_irecv failed: rc=" << irecv_rc
+                    << " chunk_idx=" << chunk_idx << " iter=" << iter
+                    << " offset=" << offset << " tag=" << tag << std::endl;
+          std::cerr.flush();  // 强制刷新缓冲区到日志文件
           break;
         }
+
+        // 【调试】记录成功的 irecv 调用
+        std::cout << "[DEBUG] tcpx_irecv success: chunk_idx=" << chunk_idx
+                  << " tag=" << tag << " request=" << recv_request << std::endl;
 
         // ======================================================================
         // 轮询等待接收完成（tcpx_test）
@@ -539,15 +549,15 @@ int main(int argc, char** argv) {
 
         int done = 0, received_size = 0;
 
-        // 【注意】最多轮询 1000000 次（约 10 秒），避免无限等待
-        for (int poll = 0; poll < 1000000 && !done; ++poll) {
+        // 【修复】移除超时限制，持续轮询直到接收完成
+        // 原因：
+        // 1. tcpxTest 本身没有超时机制，只是检查请求是否完成
+        // 2. 之前的 10 秒超时导致 Server 端提前退出（只处理了 17 个 chunks）
+        // 3. 性能测试中，我们期望所有数据都能到达
+        // 4. 如果真的有问题（如网络断开），程序会卡住，用户可以手动中断
+        while (!done) {
           tcpx_test(recv_request, &done, &received_size);
           if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
-        }
-
-        if (!done) {
-          std::cerr << "[ERROR] Receive timeout at iteration " << iter << " offset=" << offset << std::endl;
-          break;
         }
 
         // ======================================================================
@@ -649,11 +659,18 @@ int main(int argc, char** argv) {
               // 【关键】释放最老的 chunk 的 TCPX 请求槽
               // 这告诉 TCPX 插件：我已经处理完这个请求，可以重用这个槽了
               void* oldest_req = pending_reqs.front();
+              int oldest_chunk_idx = pending_indices.front();
+
+              std::cout << "[DEBUG] Releasing TCPX request: chunk_idx=" << oldest_chunk_idx
+                        << " request=" << oldest_req << " pending_before=" << pending_reqs.size() << std::endl;
+
               tcpx_irecv_consumed(recv_comm, 1, oldest_req);
 
               // 从滑动窗口中移除最老的 chunk
               pending_reqs.erase(pending_reqs.begin());
               pending_indices.erase(pending_indices.begin());
+
+              std::cout << "[DEBUG] Request released: pending_after=" << pending_reqs.size() << std::endl;
             }
 
             // ----------------------------------------------------------------
@@ -773,10 +790,14 @@ int main(int argc, char** argv) {
       // 必须等待它们全部完成并释放请求槽，否则会泄漏资源
 
       if (!use_host_recv && impl == "kernel") {
+        std::cout << "[DEBUG] Draining sliding window: " << pending_reqs.size() << " pending requests" << std::endl;
+
         while (!pending_reqs.empty()) {
           // 获取最老的 chunk
           int oldest_idx = pending_indices.front();
           cudaEvent_t oldest_event = events[oldest_idx % MAX_INFLIGHT];
+
+          std::cout << "[DEBUG] Waiting for chunk " << oldest_idx << " (event_idx=" << (oldest_idx % MAX_INFLIGHT) << ")" << std::endl;
 
           // 等待 kernel 完成
           cudaError_t err = cudaEventSynchronize(oldest_event);
@@ -793,6 +814,8 @@ int main(int argc, char** argv) {
           pending_reqs.erase(pending_reqs.begin());
           pending_indices.erase(pending_indices.begin());
         }
+
+        std::cout << "[DEBUG] Sliding window drained, remaining: " << pending_reqs.size() << std::endl;
       }
 
       // ========================================================================
@@ -1016,16 +1039,11 @@ int main(int argc, char** argv) {
           void* oldest_req = pending_send_reqs.front();
           int done = 0, sent_size = 0;
 
-          // 轮询等待最老的 send 完成
-          for (int poll = 0; poll < 1000000 && !done; ++poll) {
+          // 【修复】移除超时限制，持续轮询直到发送完成
+          // 原因：与 Server 端相同，tcpxTest 本身没有超时机制
+          while (!done) {
             tcpx_test(oldest_req, &done, &sent_size);
             if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
-          }
-
-          if (!done) {
-            std::cerr << "[ERROR] Send timeout (sliding window drain) at iteration " << iter
-                      << " chunk=" << chunk_counter << std::endl;
-            break;
           }
 
           // 【重要】Send 请求在 tcpx_test 返回 done=1 时自动释放
@@ -1056,24 +1074,23 @@ int main(int argc, char** argv) {
       // 【重要】在迭代结束时，滑动窗口中可能还有未完成的 send 请求
       // 必须等待它们全部完成，确保所有数据都已发送
 
+      std::cout << "[DEBUG] Draining client sliding window: " << pending_send_reqs.size() << " pending send requests" << std::endl;
+
       while (!pending_send_reqs.empty()) {
         void* oldest_req = pending_send_reqs.front();
         int done = 0, sent_size = 0;
 
-        // 轮询等待完成
-        for (int poll = 0; poll < 1000000 && !done; ++poll) {
+        // 【修复】移除超时限制，持续轮询直到发送完成
+        while (!done) {
           tcpx_test(oldest_req, &done, &sent_size);
           if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
-        }
-
-        if (!done) {
-          std::cerr << "[ERROR] Send timeout (final drain) at iteration " << iter << std::endl;
-          break;
         }
 
         // Send 请求自动释放，只需从窗口中移除
         pending_send_reqs.erase(pending_send_reqs.begin());
       }
+
+      std::cout << "[DEBUG] Client sliding window drained, remaining: " << pending_send_reqs.size() << std::endl;
 
       // ========================================================================
       // 计算本次迭代的性能

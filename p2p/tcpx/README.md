@@ -18,14 +18,14 @@ make test_tcpx_perf -j4
 
 ### Run Single Test (64MB)
 
-**Server (10.64.52.73):**
+**Server (10.65.74.150):**
 ```bash
 ./bench_p2p.sh server 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
 ```
 
-**Client (10.64.113.74):**
+**Client (10.64.113.77):**
 ```bash
-./bench_p2p.sh client 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
+./bench_p2p.sh client 10.65.74.150 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
 ```
 
 ### Run Full Sweep (4KB → 256MB)
@@ -37,7 +37,7 @@ make test_tcpx_perf -j4
 
 **Client:**
 ```bash
-./bench_p2p_sweep_client.sh 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
+./bench_p2p_sweep_client.sh 10.65.74.150 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
 ```
 
 Results: `logs/p2p_sweep_YYYYMMDD_HHMMSS.md`
@@ -193,7 +193,7 @@ Options:
 ### Test hangs or times out
 **Possible causes:**
 1. Firewall blocking ports → Check port range 50000-60000
-2. Wrong server IP → Verify 10.64.52.73 reachable
+2. Wrong server IP → Verify 10.65.74.150 reachable
 3. GPU not accessible → Check `nvidia-smi`
 
 ---

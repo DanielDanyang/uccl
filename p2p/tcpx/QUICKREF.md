@@ -14,11 +14,11 @@ make test_tcpx_perf -j4
 
 ### Single Test (64MB)
 ```bash
-# Server (10.64.52.73)
+# Server (10.65.74.150)
 ./bench_p2p.sh server 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
 
-# Client (10.64.113.74)
-./bench_p2p.sh client 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
+# Client (10.64.113.77)
+./bench_p2p.sh client 10.65.74.150 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
 ```
 
 ### Full Sweep (4KB → 256MB)
@@ -27,7 +27,7 @@ make test_tcpx_perf -j4
 ./bench_p2p_sweep_server.sh 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
 
 # Client
-./bench_p2p_sweep_client.sh 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
+./bench_p2p_sweep_client.sh 10.65.74.150 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
 ```
 
 ---

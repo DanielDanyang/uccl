@@ -355,7 +355,7 @@ UCCL_TCPX_HOST_RECV_DEBUG=0 UCCL_TCPX_UNPACK_IMPL=kernel \
 ./tests/test_tcpx_perf server 0 | tee server_fixed.log
 
 # Client
-./tests/test_tcpx_perf client 0 10.64.52.73 | tee client_fixed.log
+./tests/test_tcpx_perf client 10.65.74.150 0 | tee client_fixed.log
 ```
 
 **预期结果：**
