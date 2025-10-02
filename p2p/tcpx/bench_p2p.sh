@@ -169,17 +169,11 @@ if [[ -z "${SS_AVG_MS}" ]]; then
   exit 0
 fi
 
-SIZE_GB=$(python3 - <<PY
-print({SIZE}/(1024**3))
-PY
-)
-
-SS_BW_GBPS=$(python3 - <<PY
+SS_BW_GBPS=$(python3 -c "
 size_gb = float(${SIZE})/(1024**3)
 avg_ms = float(${SS_AVG_MS})
-print(f"{size_gb / (avg_ms/1000.0):.3f}")
-PY
-)
+print(f'{size_gb / (avg_ms/1000.0):.3f}')
+")
 
 echo "[STEADY-STATE] Avg time: ${SS_AVG_MS} ms, BW: ${SS_BW_GBPS} GB/s" | tee -a "${LOG_FILE}"
 

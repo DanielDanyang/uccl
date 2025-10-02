@@ -124,10 +124,7 @@ for SZ in "${SIZE_ARR[@]}"; do
     echo "[WARN] No steady-state line found in ${LOG_FILE} for size=${SZ}" >&2
   fi
 
-  SIZE_MB=$(python3 - <<PY
-print(int(${SZ})/(1024**2))
-PY
-)
+  SIZE_MB=$(python3 -c "print(int(${SZ})/(1024**2))")
 
   echo "${SZ},${SIZE_MB},${RUN_ITERS},${CHUNK},${NSOCKS},${NTHREADS},\"${IFACES}\",${IMPL},${AVG_MS},${BW_GBPS}" >> "${CSV_OUT}"
   echo "[CLIENT] Done size=${SZ}: ${BW_GBPS} GB/s (avg ${AVG_MS} ms)"
