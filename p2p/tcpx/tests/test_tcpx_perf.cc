@@ -2,100 +2,58 @@
  * @file test_tcpx_perf.cc
  * @brief TCPX GPU-to-GPU performance benchmark
  *
- * Tests TCPX throughput with various message sizes and unpack implementations.
- * Designed for 2 nodes with 8 H100 GPUs each (16 GPUs total).
+ * Based on test_tcpx_transfer.cc - uses SAME logic with iterations and timing.
  *
  * Usage:
- *   # Server (node 0, GPU 0)
- *   ./tests/test_tcpx_perf server 0
- *
- *   # Client (node 1, GPU 0)
- *   ./tests/test_tcpx_perf client <server_ip> 0
- *
- * Environment variables:
- *   UCCL_TCPX_UNPACK_IMPL: kernel|d2d|host (default: kernel)
- *   UCCL_TCPX_WARMUP_ITERS: Number of warmup iterations (default: 5)
- *   UCCL_TCPX_BENCH_ITERS: Number of benchmark iterations (default: 100)
+ *   UCCL_TCPX_PERF_SIZE=4194304 ./tests/test_tcpx_perf server 0
+ *   UCCL_TCPX_PERF_SIZE=4194304 ./tests/test_tcpx_perf client <server_ip> 0
  */
 
 #include "../include/tcpx_interface.h"
 #include "../include/tcpx_structs.h"
 #include "../include/rx_descriptor.h"
 #include "../device/unpack_launch.h"
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
-
 #include <cuda.h>
 #include <cuda_runtime.h>
-
-#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <string>
 #include <thread>
+#include <algorithm>
 #include <vector>
+
 
 namespace {
 constexpr size_t kHandleBytes = 128;
-struct ncclNetHandle_v7 {
-  char data[kHandleBytes];
-};
-
-constexpr int kBootstrapPort = 12346;  // Different from test_tcpx_transfer
+struct ncclNetHandle_v7 { char data[kHandleBytes]; };
+constexpr int kBootstrapPort = 12347;
 constexpr int kTransferTag = 99;
+constexpr size_t kMaxSize = 256 * 1024 * 1024;
+constexpr size_t kRegisteredBytes = kMaxSize + 4096;
 
-using NcclNetDeviceHandle = tcpx::plugin::NcclNetDeviceHandle;
-using TcpxRequest = tcpx::plugin::tcpxRequest;
-using UnpackNetDeviceHandle = tcpx::plugin::unpackNetDeviceHandle;
-using LoadMetaEntry = tcpx::plugin::loadMeta;
-
-// Test sizes: 4KB to 256MB
-const std::vector<size_t> kTestSizes = {
-  4 * 1024,           // 4 KB
-  16 * 1024,          // 16 KB
-  64 * 1024,          // 64 KB
-  256 * 1024,         // 256 KB
-  1 * 1024 * 1024,    // 1 MB
-  4 * 1024 * 1024,    // 4 MB
-  16 * 1024 * 1024,   // 16 MB
-  64 * 1024 * 1024,   // 64 MB
-  256 * 1024 * 1024,  // 256 MB
-};
-
-int getEnvInt(const char* name, int default_val) {
-  const char* val = std::getenv(name);
-  return val ? std::atoi(val) : default_val;
+int getEnvInt(const char* name, int def) {
+  const char* v = std::getenv(name);
+  return v ? std::atoi(v) : def;
 }
 
-std::string getEnvStr(const char* name, const char* default_val) {
-  const char* val = std::getenv(name);
-  return val ? std::string(val) : std::string(default_val);
+size_t getEnvSize(const char* name, size_t def) {
+  const char* v = std::getenv(name);
+  return v ? static_cast<size_t>(std::atoll(v)) : def;
 }
 
-bool cuda_check(CUresult res, const char* msg) {
-  if (res != CUDA_SUCCESS) {
-    const char* err_name = nullptr;
-    const char* err_str = nullptr;
-    cuGetErrorName(res, &err_name);
-    cuGetErrorString(res, &err_str);
-    std::cerr << "[ERROR] " << msg << ": " << err_name << " - " << err_str << std::endl;
-    return false;
-  }
-  return true;
-}
-
+// SAME as test_tcpx_transfer - returns client_fd (already accepted)
 int create_bootstrap_server() {
   int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (listen_fd < 0) return -1;
   int opt = 1;
   setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = INADDR_ANY;
@@ -108,79 +66,38 @@ int create_bootstrap_server() {
     close(listen_fd);
     return -1;
   }
-  return listen_fd;
+  // IMPORTANT: accept here and return client_fd
+  int client_fd = accept(listen_fd, nullptr, nullptr);
+  close(listen_fd);
+  return client_fd;
 }
 
-int accept_bootstrap_client(int listen_fd) {
-  sockaddr_in client_addr{};
-  socklen_t len = sizeof(client_addr);
-  return accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &len);
-}
-
-int connect_bootstrap_server(const char* server_ip) {
+int connect_bootstrap(const char* ip) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return -1;
-
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(kBootstrapPort);
-  if (inet_pton(AF_INET, server_ip, &addr.sin_addr) <= 0) {
-    close(fd);
-    return -1;
-  }
-
-  for (int retry = 0; retry < 30; ++retry) {
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
-      return fd;
-    }
+  inet_aton(ip, &addr.sin_addr);
+  for (int i = 0; i < 30; ++i) {
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) return fd;
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
   close(fd);
   return -1;
 }
-
-struct BenchmarkResult {
-  size_t size;
-  int iterations;
-  double avg_time_ms;
-  double bandwidth_gbps;
-  std::string unpack_impl;
-};
-
-void print_results(const std::vector<BenchmarkResult>& results) {
-  std::cout << "\n=== TCPX Performance Benchmark Results ===" << std::endl;
-  std::cout << std::setw(12) << "Size"
-            << std::setw(10) << "Iters"
-            << std::setw(15) << "Avg Time (ms)"
-            << std::setw(18) << "Bandwidth (GB/s)"
-            << std::setw(12) << "Unpack" << std::endl;
-  std::cout << std::string(67, '-') << std::endl;
-
-  for (const auto& r : results) {
-    std::string size_str;
-    if (r.size >= 1024 * 1024) {
-      size_str = std::to_string(r.size / (1024 * 1024)) + " MB";
-    } else if (r.size >= 1024) {
-      size_str = std::to_string(r.size / 1024) + " KB";
-    } else {
-      size_str = std::to_string(r.size) + " B";
-    }
-
-    std::cout << std::setw(12) << size_str
-              << std::setw(10) << r.iterations
-              << std::setw(15) << std::fixed << std::setprecision(3) << r.avg_time_ms
-              << std::setw(18) << std::fixed << std::setprecision(2) << r.bandwidth_gbps
-              << std::setw(12) << r.unpack_impl << std::endl;
-  }
-}
-
-} // namespace
+}  // namespace
 
 int main(int argc, char** argv) {
+  setenv("NCCL_MIN_ZCOPY_SIZE", "4096", 0);
+  setenv("NCCL_GPUDIRECTTCPX_MIN_ZCOPY_SIZE", "4096", 0);
+  setenv("NCCL_GPUDIRECTTCPX_RECV_SYNC", "1", 0);
+  // Enable wrapper debug logs unless user overrides
+  setenv("UCCL_TCPX_DEBUG", "1", 0);
+  if (!std::getenv("UCCL_TCPX_LAUNCH_DEBUG")) setenv("UCCL_TCPX_LAUNCH_DEBUG", "0", 0);
+
   if (argc < 3) {
-    std::cerr << "Usage: " << argv[0] << " <server|client> <server_ip|gpu_id> [gpu_id]" << std::endl;
-    std::cerr << "  Server: " << argv[0] << " server <gpu_id>" << std::endl;
-    std::cerr << "  Client: " << argv[0] << " client <server_ip> <gpu_id>" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <server|client> <gpu_id|server_ip> [gpu_id]" << std::endl;
     return 1;
   }
 
@@ -195,36 +112,24 @@ int main(int argc, char** argv) {
     gpu_id = (argc > 3) ? std::atoi(argv[3]) : 0;
   }
 
-  int warmup_iters = getEnvInt("UCCL_TCPX_WARMUP_ITERS", 5);
-  int bench_iters = getEnvInt("UCCL_TCPX_BENCH_ITERS", 100);
-  std::string unpack_impl = getEnvStr("UCCL_TCPX_UNPACK_IMPL", "kernel");
+  size_t test_size = getEnvSize("UCCL_TCPX_PERF_SIZE", 4 * 1024 * 1024);
+  int iterations = getEnvInt("UCCL_TCPX_PERF_ITERS", 10);
+  // Honor NCCL-style chunk size to mirror NCCL tests (fallback to 512KB)
+  size_t chunk_bytes = getEnvSize("UCCL_TCPX_CHUNK_BYTES", getEnvSize("NCCL_P2P_NET_CHUNKSIZE", 512 * 1024));
+  if (test_size > kMaxSize) test_size = kMaxSize;
 
   std::cout << "[PERF] Mode: " << (is_server ? "SERVER" : "CLIENT") << std::endl;
   std::cout << "[PERF] GPU: " << gpu_id << std::endl;
-  std::cout << "[PERF] Warmup iterations: " << warmup_iters << std::endl;
-  std::cout << "[PERF] Benchmark iterations: " << bench_iters << std::endl;
-  std::cout << "[PERF] Unpack implementation: " << unpack_impl << std::endl;
+  std::cout << "[PERF] Size: " << (test_size / 1024 / 1024) << " MB" << std::endl;
+  std::cout << "[PERF] Iterations: " << iterations << std::endl;
 
-  // Initialize CUDA
-  if (!cuda_check(cuInit(0), "cuInit")) return 1;
-  CUdevice cu_device;
-  if (!cuda_check(cuDeviceGet(&cu_device, gpu_id), "cuDeviceGet")) return 1;
-  CUcontext cu_context;
-  if (!cuda_check(cuDevicePrimaryCtxRetain(&cu_context, cu_device), "cuDevicePrimaryCtxRetain")) return 1;
-  if (!cuda_check(cuCtxSetCurrent(cu_context), "cuCtxSetCurrent")) return 1;
-  cudaSetDevice(gpu_id);
-
-  // Initialize TCPX
   int ndev = tcpx_get_device_count();
   if (ndev <= 0 || gpu_id >= ndev) {
-    std::cerr << "[ERROR] Invalid GPU ID or TCPX not available" << std::endl;
+    std::cerr << "[ERROR] Invalid GPU" << std::endl;
     return 1;
   }
 
-  std::vector<BenchmarkResult> results;
-
   if (is_server) {
-    // Server mode: receive and measure
     ncclNetHandle_v7 handle{};
     void* listen_comm = nullptr;
     if (tcpx_listen(gpu_id, &handle, &listen_comm) != 0) {
@@ -232,188 +137,398 @@ int main(int argc, char** argv) {
       return 1;
     }
 
+    std::cout << "[PERF] Waiting for client..." << std::endl;
+
+    // IMPORTANT: create_bootstrap_server already does accept() internally
     int bootstrap_fd = create_bootstrap_server();
     if (bootstrap_fd < 0) {
-      std::cerr << "[ERROR] bootstrap server creation failed" << std::endl;
+      std::cerr << "[ERROR] bootstrap server failed" << std::endl;
       return 1;
     }
 
-    std::cout << "[PERF] Waiting for client connection..." << std::endl;
-    int client_fd = accept_bootstrap_client(bootstrap_fd);
-    if (client_fd < 0) {
-      std::cerr << "[ERROR] bootstrap accept failed" << std::endl;
+    std::cout << "[PERF] Bootstrap connection established, sending handle" << std::endl;
+
+    // Send handle to client (SAME as transfer - with loop)
+    size_t total_sent = 0;
+    while (total_sent < kHandleBytes) {
+      ssize_t sent = send(bootstrap_fd, handle.data + total_sent, kHandleBytes - total_sent, 0);
+      if (sent <= 0) {
+        std::cerr << "[ERROR] Failed to send handle" << std::endl;
+        close(bootstrap_fd);
+        return 1;
+      }
+      total_sent += static_cast<size_t>(sent);
+    }
+
+    // Accept TCPX connection (SAME as transfer - with retry)
+    void* recv_comm = nullptr;
+    alignas(16) unsigned char recv_dev_handle_storage[512] = {0};
+    void* recv_dev_handle = recv_dev_handle_storage;
+
+    int attempts = 0;
+    constexpr int kMaxRetries = 100;
+    while (attempts < kMaxRetries) {
+      int rc = tcpx_accept_v5(listen_comm, &recv_comm, &recv_dev_handle);
+      if (rc != 0) {
+        std::cerr << "[ERROR] tcpx_accept_v5 returned rc=" << rc << std::endl;
+        close(bootstrap_fd);
+        return 1;
+      }
+      if (recv_comm) break;
+      ++attempts;
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!recv_comm) {
+      std::cerr << "[ERROR] Failed to obtain recv_comm after retries" << std::endl;
       close(bootstrap_fd);
       return 1;
     }
 
-    // Send handle to client
-    send(client_fd, &handle, sizeof(handle), 0);
-    close(client_fd);
-    close(bootstrap_fd);
+    // Select unpack implementation (kernel | d2d | host)
+    const char* impl_env = std::getenv("UCCL_TCPX_UNPACK_IMPL");
+    std::string impl = impl_env ? std::string(impl_env) : std::string("kernel");
+    std::transform(impl.begin(), impl.end(), impl.begin(), ::tolower);
+    std::cout << "[PERF] Unpack impl: " << impl << std::endl;
 
-    // Accept TCPX connection
-    void* recv_comm = nullptr;
-    void* recv_dev_handle = nullptr;
-    if (tcpx_accept_v5(listen_comm, &recv_comm, &recv_dev_handle) != 0) {
-      std::cerr << "[ERROR] tcpx_accept_v5 failed" << std::endl;
-      return 1;
-    }
 
     std::cout << "[PERF] TCPX connection established" << std::endl;
 
-    // Run benchmarks for each size
-    for (size_t test_size : kTestSizes) {
-      // Allocate buffer (round up to 4KB alignment)
-      size_t alloc_size = ((test_size + 4095) / 4096) * 4096;
-      CUdeviceptr d_buf;
-      if (!cuda_check(cuMemAlloc(&d_buf, alloc_size), "cuMemAlloc")) continue;
+    // Host-recv debug switch (align with transfer test)
+    bool use_host_recv = false;
+    if (const char* env = std::getenv("UCCL_TCPX_HOST_RECV_DEBUG")) {
+      use_host_recv = (std::string(env) != "0");
+    }
+    std::cout << "[PERF] Host recv debug mode: " << (use_host_recv ? "ON" : "OFF") << std::endl;
 
-      void* recv_mhandle = nullptr;
-      if (tcpx_reg_mr(recv_comm, reinterpret_cast<void*>(d_buf), alloc_size,
-                      NCCL_PTR_CUDA, &recv_mhandle) != 0) {
-        cuMemFree(d_buf);
-        continue;
+    // CUDA init/context (keep consistent with transfer)
+    CUdevice cuDev; CUcontext cuCtx;
+    if (cuInit(0) != CUDA_SUCCESS ||
+        cuDeviceGet(&cuDev, gpu_id) != CUDA_SUCCESS ||
+        cuDevicePrimaryCtxRetain(&cuCtx, cuDev) != CUDA_SUCCESS ||
+        cuCtxSetCurrent(cuCtx) != CUDA_SUCCESS) {
+      std::cerr << "[ERROR] CUDA initialization failed" << std::endl;
+      close(bootstrap_fd);
+      return 1;
+    }
+    if (cudaSetDevice(gpu_id) != cudaSuccess) {
+      std::cerr << "[ERROR] cudaSetDevice failed" << std::endl;
+      close(bootstrap_fd);
+      return 1;
+    }
+
+    // Choose receive buffer according to mode
+    CUdeviceptr d_base = 0, d_aligned = 0;
+    void* h_recv_base = nullptr;
+    void* recv_buf = nullptr;
+    int recv_ptr_type = NCCL_PTR_CUDA;
+
+    if (!use_host_recv) {
+      if (cuMemAlloc(&d_base, kRegisteredBytes + 4096) != CUDA_SUCCESS) {
+        std::cerr << "[ERROR] CUDA allocation failed" << std::endl;
+        close(bootstrap_fd);
+        return 1;
       }
+      // Align to 4KB
+      uintptr_t addr = static_cast<uintptr_t>(d_base);
+      addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);
+      d_aligned = static_cast<CUdeviceptr>(addr);
+      recv_buf = reinterpret_cast<void*>(d_aligned);
+      recv_ptr_type = NCCL_PTR_CUDA;
+    } else {
+      if (cudaMallocHost(&h_recv_base, kRegisteredBytes) != cudaSuccess) {
+        std::cerr << "[ERROR] cudaMallocHost failed" << std::endl;
+        close(bootstrap_fd);
+        return 1;
+      }
+      recv_buf = h_recv_base;
+      recv_ptr_type = NCCL_PTR_HOST;
+    }
 
-      // Warmup + benchmark
-      int total_iters = warmup_iters + bench_iters;
-      double total_time_ms = 0.0;
+    void* recv_mhandle = nullptr;
+    std::cout << "[PERF][SERVER] Registering recv buffer: ptr=" << recv_buf
+              << " size=" << kRegisteredBytes
+              << " type=" << (recv_ptr_type == NCCL_PTR_CUDA ? "NCCL_PTR_CUDA" : "NCCL_PTR_HOST") << std::endl;
+    if (tcpx_reg_mr(recv_comm, recv_buf, kRegisteredBytes, recv_ptr_type, &recv_mhandle) != 0) {
+      std::cerr << "[ERROR] tcpx_reg_mr failed" << std::endl;
+      if (h_recv_base) cudaFreeHost(h_recv_base);
+      if (d_base) cuMemFree(d_base);
+      close(bootstrap_fd);
+      return 1;
+    }
+    std::cout << "[PERF][SERVER] Recv buffer registered successfully, mhandle=" << recv_mhandle << std::endl;
 
-      for (int iter = 0; iter < total_iters; ++iter) {
-        void* recv_data[1] = {reinterpret_cast<void*>(d_buf)};
-        int recv_sizes[1] = {static_cast<int>(test_size)};
-        int recv_tags[1] = {kTransferTag};
+    double total_time_ms = 0.0;
+
+    for (int iter = 0; iter < iterations; ++iter) {
+      std::cout << "[PERF] Iteration " << iter << ": total bytes=" << test_size
+                << ", chunk_bytes=" << chunk_bytes << std::endl;
+
+      auto start = std::chrono::high_resolution_clock::now();
+
+      size_t offset = 0;
+      while (offset < test_size) {
+        const size_t this_chunk = std::min(chunk_bytes, test_size - offset);
+        void* dst_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(recv_buf) + offset);
+        const size_t chunk_idx = offset / chunk_bytes;
+        const int tag = kTransferTag + static_cast<int>(iter) * 10000 + static_cast<int>(chunk_idx);
+        std::cout << "[PERF][SERVER] chunk_idx=" << chunk_idx << " tag=" << tag
+                  << " size=" << this_chunk << " offset=" << offset << std::endl;
+
+        void* recv_data[1] = {dst_ptr};
+        int recv_sizes[1] = {static_cast<int>(this_chunk)};
+        int recv_tags[1] = {tag};
         void* recv_mhandles[1] = {recv_mhandle};
         void* recv_request = nullptr;
 
-        auto start = std::chrono::high_resolution_clock::now();
-
-        if (tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags,
-                       recv_mhandles, &recv_request) != 0) {
-          std::cerr << "[ERROR] tcpx_irecv failed" << std::endl;
+        if (tcpx_irecv(recv_comm, 1, recv_data, recv_sizes, recv_tags, recv_mhandles, &recv_request) != 0) {
+          std::cerr << "[ERROR] tcpx_irecv failed (chunk)" << std::endl;
           break;
         }
 
-        // Wait for completion
         int done = 0, received_size = 0;
-        while (!done) {
+        for (int poll = 0; poll < 1000000 && !done; ++poll) {
           tcpx_test(recv_request, &done, &received_size);
+          if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
+        }
+        if (!done) {
+          std::cerr << "[ERROR] Receive timeout at iteration " << iter << " offset=" << offset << std::endl;
+          break;
         }
 
-        // Unpack if needed (only for kernel/d2d, measure unpack time)
-        // For simplicity, we skip actual unpack in perf test
-        // Real unpack would be done here
+        if (use_host_recv) {
+          // In host-recv debug mode, data is already in host buffer; skip unpack.
+          std::cout << "[PERF][SERVER] host-recv completed size=" << received_size
+                    << " (skip unpack)" << std::endl;
+          offset += this_chunk;
+        } else {
+          auto* rx_req = reinterpret_cast<tcpx::plugin::tcpxRequest*>(recv_request);
+          auto* dev_handle_struct = reinterpret_cast<tcpx::plugin::NcclNetDeviceHandle*>(recv_dev_handle);
+          if (!rx_req || !dev_handle_struct || !rx_req->unpack_slot.mem || !rx_req->unpack_slot.cnt) {
+            std::cerr << "[ERROR] Missing TCPX metadata for unpack" << std::endl;
+            break;
+          }
+          uint64_t frag_count = *(rx_req->unpack_slot.cnt);
+          std::cout << "[PERF][SERVER] frag_count=" << frag_count << std::endl;
 
-        auto end = std::chrono::high_resolution_clock::now();
-        double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+          if (frag_count == 0 || frag_count > MAX_UNPACK_DESCRIPTORS) {
+            std::cerr << "[ERROR] Invalid fragment count: " << frag_count << std::endl;
+            break;
+          }
 
-        if (iter >= warmup_iters) {
-          total_time_ms += iter_time_ms;
+          tcpx::plugin::unpackNetDeviceHandle dev_handle{};
+          if (cuMemcpyDtoH(&dev_handle, reinterpret_cast<CUdeviceptr>(dev_handle_struct->handle),
+                           sizeof(dev_handle)) != CUDA_SUCCESS) {
+            std::cerr << "[ERROR] Failed to read device handle" << std::endl;
+            break;
+          }
+
+          auto* meta_entries = static_cast<tcpx::plugin::loadMeta*>(rx_req->unpack_slot.mem);
+          tcpx::rx::UnpackDescriptorBlock desc_block;
+          tcpx::rx::buildDescriptorBlock(meta_entries, static_cast<uint32_t>(frag_count),
+                                         dev_handle.bounce_buf, dst_ptr, desc_block);
+          desc_block.ready_flag = rx_req->unpack_slot.cnt;
+          desc_block.ready_threshold = frag_count;
+
+          int lrc = 0;
+          if (impl == "kernel") {
+            cudaStream_t stream;
+            if (cudaStreamCreate(&stream) != cudaSuccess) {
+              std::cerr << "[ERROR] Failed to create stream" << std::endl;
+              break;
+            }
+            tcpx::device::UnpackLaunchConfig cfg;
+            cfg.stream = stream;
+            cfg.enable_profiling = false;
+            cfg.use_small_kernel = true;
+            tcpx::device::UnpackLauncher launcher(cfg);
+            lrc = launcher.launchSync(desc_block);
+            cudaStreamDestroy(stream);
+            if (lrc != 0) {
+              std::cerr << "[ERROR] Unpack kernel failed: " << lrc << std::endl;
+              break;
+            }
+          } else if (impl == "d2d") {
+            for (uint32_t i = 0; i < desc_block.count; ++i) {
+              const auto& meta = desc_block.descriptors[i];
+              CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
+                  reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
+              CUdeviceptr dst_ptr = static_cast<CUdeviceptr>(
+                  reinterpret_cast<uintptr_t>(desc_block.dst_buffer) + meta.dst_off);
+              if (cuMemcpyDtoD(dst_ptr, src_ptr, meta.len) != CUDA_SUCCESS) {
+                std::cerr << "[ERROR] D2D copy failed at descriptor " << i << std::endl;
+                lrc = -1;
+                break;
+              }
+            }
+            if (lrc != 0) break;
+          } else { // host gather
+            std::vector<unsigned char> tmp(desc_block.total_bytes);
+            size_t off = 0;
+            for (uint32_t i = 0; i < desc_block.count; ++i) {
+              const auto& meta = desc_block.descriptors[i];
+              CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
+                  reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
+              if (cuMemcpyDtoH(tmp.data() + off, src_ptr, meta.len) != CUDA_SUCCESS) {
+                std::cerr << "[ERROR] Host gather DtoH failed at descriptor " << i << std::endl;
+                lrc = -1;
+                break;
+              }
+              off += meta.len;
+            }
+            if (lrc != 0) break;
+            if (cuMemcpyHtoD(static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(desc_block.dst_buffer)),
+                             tmp.data(), tmp.size()) != CUDA_SUCCESS) {
+              std::cerr << "[ERROR] Host gather HtoD failed" << std::endl;
+              break;
+            }
+          }
+
+          tcpx_irecv_consumed(recv_comm, 1, recv_request);
+          offset += this_chunk;
         }
-
-        tcpx_irecv_consumed(recv_comm, 1, recv_request);
       }
 
-      double avg_time_ms = total_time_ms / bench_iters;
-      double bandwidth_gbps = (test_size / (1024.0 * 1024.0 * 1024.0)) / (avg_time_ms / 1000.0);
-
-      results.push_back({test_size, bench_iters, avg_time_ms, bandwidth_gbps, unpack_impl});
-
-      tcpx_dereg_mr(recv_comm, recv_mhandle);
-      cuMemFree(d_buf);
-
-      std::cout << "[PERF] Completed: " << test_size << " bytes, "
-                << bandwidth_gbps << " GB/s" << std::endl;
+      auto end = std::chrono::high_resolution_clock::now();
+      double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      total_time_ms += iter_time_ms;
+      std::cout << "[PERF] Iter " << iter << " time=" << iter_time_ms << "ms" << std::endl;
     }
 
+    double avg_ms = total_time_ms / iterations;
+    double bw_gbps = (test_size / (1024.0 * 1024.0 * 1024.0)) / (avg_ms / 1000.0);
+
+    std::cout << "[PERF] Avg: " << std::fixed << std::setprecision(3) << avg_ms << " ms, "
+              << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
+
+    tcpx_dereg_mr(recv_comm, recv_mhandle);
+    if (h_recv_base) cudaFreeHost(h_recv_base);
+    if (d_base) cuMemFree(d_base);
+    cuDevicePrimaryCtxRelease(cuDev);
     tcpx_close_recv(recv_comm);
     tcpx_close_listen(listen_comm);
+    close(bootstrap_fd);
 
   } else {
-    // Client mode: send and measure
-    int bootstrap_fd = connect_bootstrap_server(server_ip.c_str());
+    int bootstrap_fd = connect_bootstrap(server_ip.c_str());
     if (bootstrap_fd < 0) {
       std::cerr << "[ERROR] bootstrap connect failed" << std::endl;
       return 1;
     }
 
-    // Receive handle from server
+    // Receive handle from server (SAME as transfer - with loop)
     ncclNetHandle_v7 handle{};
-    recv(bootstrap_fd, &handle, sizeof(handle), MSG_WAITALL);
-    close(bootstrap_fd);
+    size_t total_received = 0;
+    while (total_received < kHandleBytes) {
+      ssize_t r = recv(bootstrap_fd, handle.data + total_received, kHandleBytes - total_received, 0);
+      if (r <= 0) {
+        std::cerr << "[ERROR] Failed to receive handle" << std::endl;
+        close(bootstrap_fd);
+        return 1;
+      }
+      total_received += static_cast<size_t>(r);
+    }
 
-    // Connect to server
     void* send_comm = nullptr;
-    void* send_dev_handle = nullptr;
-    if (tcpx_connect_v5(gpu_id, &handle, &send_comm, &send_dev_handle) != 0) {
+    alignas(16) unsigned char send_dev_handle_storage[512] = {0};
+    void* send_dev_handle = send_dev_handle_storage;
+    if (tcpx_connect_v5(gpu_id, &handle, &send_comm, &send_dev_handle) != 0 || !send_comm) {
       std::cerr << "[ERROR] tcpx_connect_v5 failed" << std::endl;
+      close(bootstrap_fd);
       return 1;
     }
 
     std::cout << "[PERF] TCPX connection established" << std::endl;
 
-    // Run benchmarks for each size
-    for (size_t test_size : kTestSizes) {
-      // Allocate buffer (round up to 4KB alignment)
-      size_t alloc_size = ((test_size + 4095) / 4096) * 4096;
-      CUdeviceptr d_buf;
-      if (!cuda_check(cuMemAlloc(&d_buf, alloc_size), "cuMemAlloc")) continue;
-
-      // Fill with test pattern
-      std::vector<uint8_t> pattern(test_size, 0xAB);
-      cuMemcpyHtoD(d_buf, pattern.data(), test_size);
-
-      void* send_mhandle = nullptr;
-      if (tcpx_reg_mr(send_comm, reinterpret_cast<void*>(d_buf), alloc_size,
-                      NCCL_PTR_CUDA, &send_mhandle) != 0) {
-        cuMemFree(d_buf);
-        continue;
-      }
-
-      // Warmup + benchmark
-      int total_iters = warmup_iters + bench_iters;
-      double total_time_ms = 0.0;
-
-      for (int iter = 0; iter < total_iters; ++iter) {
-        auto start = std::chrono::high_resolution_clock::now();
-
-        void* send_request = nullptr;
-        if (tcpx_isend(send_comm, reinterpret_cast<void*>(d_buf), test_size,
-                       kTransferTag, send_mhandle, &send_request) != 0) {
-          std::cerr << "[ERROR] tcpx_isend failed" << std::endl;
-          break;
-        }
-
-        // Wait for completion
-        int done = 0, sent_size = 0;
-        while (!done) {
-          tcpx_test(send_request, &done, &sent_size);
-        }
-
-        auto end = std::chrono::high_resolution_clock::now();
-        double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-
-        if (iter >= warmup_iters) {
-          total_time_ms += iter_time_ms;
-        }
-      }
-
-      double avg_time_ms = total_time_ms / bench_iters;
-      double bandwidth_gbps = (test_size / (1024.0 * 1024.0 * 1024.0)) / (avg_time_ms / 1000.0);
-
-      results.push_back({test_size, bench_iters, avg_time_ms, bandwidth_gbps, unpack_impl});
-
-      tcpx_dereg_mr(send_comm, send_mhandle);
-      cuMemFree(d_buf);
-
-      std::cout << "[PERF] Completed: " << test_size << " bytes, "
-                << bandwidth_gbps << " GB/s" << std::endl;
+    // Allocate GPU buffer (SAME as test_tcpx_transfer)
+    CUdevice cuDev;
+    CUcontext cuCtx;
+    CUdeviceptr d_base, d_aligned;
+    if (cuInit(0) != CUDA_SUCCESS ||
+        cuDeviceGet(&cuDev, gpu_id) != CUDA_SUCCESS ||
+        cuDevicePrimaryCtxRetain(&cuCtx, cuDev) != CUDA_SUCCESS ||
+        cuCtxSetCurrent(cuCtx) != CUDA_SUCCESS ||
+        cuMemAlloc(&d_base, kRegisteredBytes + 4096) != CUDA_SUCCESS) {
+      std::cerr << "[ERROR] CUDA initialization or allocation failed" << std::endl;
+      close(bootstrap_fd);
+      return 1;
     }
 
+    // IMPORTANT: cudaSetDevice (SAME as transfer)
+    if (cudaSetDevice(gpu_id) != cudaSuccess) {
+      std::cerr << "[ERROR] cudaSetDevice failed" << std::endl;
+      cuMemFree(d_base);
+      close(bootstrap_fd);
+      return 1;
+    }
+
+    // Align to 4KB
+    uintptr_t addr = static_cast<uintptr_t>(d_base);
+    addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);
+    d_aligned = static_cast<CUdeviceptr>(addr);
+    void* send_buf = reinterpret_cast<void*>(d_aligned);
+
+    void* send_mhandle = nullptr;
+    std::cout << "[PERF][CLIENT] Registering send buffer: ptr=" << send_buf
+              << " size=" << kRegisteredBytes << " type=NCCL_PTR_CUDA" << std::endl;
+    if (tcpx_reg_mr(send_comm, send_buf, kRegisteredBytes, NCCL_PTR_CUDA, &send_mhandle) != 0) {
+      std::cerr << "[ERROR] tcpx_reg_mr failed" << std::endl;
+      cuMemFree(d_base);
+      close(bootstrap_fd);
+      return 1;
+    }
+    std::cout << "[PERF][CLIENT] Send buffer registered successfully, mhandle=" << send_mhandle << std::endl;
+
+    double total_time_ms = 0.0;
+
+    for (int iter = 0; iter < iterations; ++iter) {
+      std::cout << "[PERF] Iteration " << iter << ": total bytes=" << test_size
+                << ", chunk_bytes=" << chunk_bytes << std::endl;
+      auto start = std::chrono::high_resolution_clock::now();
+
+      size_t offset = 0;
+      while (offset < test_size) {
+        const size_t this_chunk = std::min(chunk_bytes, test_size - offset);
+        void* src_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(send_buf) + offset);
+        const size_t chunk_idx = offset / chunk_bytes;
+        const int tag = kTransferTag + static_cast<int>(iter) * 10000 + static_cast<int>(chunk_idx);
+        std::cout << "[PERF][CLIENT] chunk_idx=" << chunk_idx << " tag=" << tag
+                  << " size=" << this_chunk << " offset=" << offset << std::endl;
+        void* send_request = nullptr;
+        if (tcpx_isend(send_comm, src_ptr, static_cast<int>(this_chunk), tag, send_mhandle, &send_request) != 0) {
+          std::cerr << "[ERROR] tcpx_isend failed (chunk)" << std::endl;
+          break;
+        }
+        int done = 0, sent_size = 0;
+        for (int poll = 0; poll < 1000000 && !done; ++poll) {
+          tcpx_test(send_request, &done, &sent_size);
+          if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
+        }
+        if (!done) {
+          std::cerr << "[ERROR] Send timeout at iteration " << iter << " offset=" << offset << std::endl;
+          break;
+        }
+        offset += this_chunk;
+      }
+
+      auto end = std::chrono::high_resolution_clock::now();
+      double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      total_time_ms += iter_time_ms;
+      std::cout << "[PERF] Iter " << iter << " time=" << iter_time_ms << "ms" << std::endl;
+    }
+
+    double avg_ms = total_time_ms / iterations;
+    double bw_gbps = (test_size / (1024.0 * 1024.0 * 1024.0)) / (avg_ms / 1000.0);
+
+    std::cout << "[PERF] Avg: " << std::fixed << std::setprecision(3) << avg_ms << " ms, "
+              << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
+
+    tcpx_dereg_mr(send_comm, send_mhandle);
+    cuMemFree(d_base);
+    cuDevicePrimaryCtxRelease(cuDev);
     tcpx_close_send(send_comm);
+    close(bootstrap_fd);
   }
 
-  print_results(results);
   return 0;
 }
 
