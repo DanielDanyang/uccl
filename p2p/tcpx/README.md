@@ -1,320 +1,261 @@
-# TCPX GPU-to-GPU Transfer
+# TCPX P2P Performance Testing
 
-TCPX-based GPU-to-GPU data transfer implementation using [nccl-plugin-gpudirecttcpx](https://github.com/google/nccl-plugin-gpudirecttcpx).
+GPU-to-GPU point-to-point performance testing using Google's TCPX plugin with GPU Direct TCPX (devmem-tcp).
 
-## 🎉 Status Update
-
-✅ **GPU Unpack Kernel is WORKING!** (2025-01-XX)
-
-- Basic transfer test passes (23 bytes successfully transferred)
-- Kernel deadlock bug fixed
-- Ready for performance testing on large messages (4KB - 256MB)
-- See [docs/SUCCESS_SUMMARY.md](docs/SUCCESS_SUMMARY.md) for details
-
-## Features
-
-- TCPX connection management (listen, accept, connect)
-- CUDA device buffer registration
-- Async send/receive operations
-- RX metadata parsing and descriptor construction
-- Multiple unpack implementations:
-  - **Kernel**: GPU-based unpack with vectorized memory access ✅ **WORKING**
-  - **D2D**: Device-to-device memcpy (fallback)
-  - **Host**: Host-mediated gather (debugging only)
-
----
-
-## Setup Guide
+## Quick Start
 
 ### Prerequisites
-
-- CUDA Toolkit 11.0+
-- H100 or compatible GPU with devmem-tcp support
+- Two H100 nodes with TCPX support
+- Google nccl-plugin-gpudirecttcpx installed
+- Multi-NIC environment (4 NICs recommended)
 - Linux kernel with devmem-tcp support
-- C++17 compatible compiler
-- NCCL GPUDirect TCPX plugin installed
 
-### Step 1: Install TCPX Plugin
-
-The TCPX plugin is typically installed at `/var/lib/tcpx/lib64`. We need to create a symlink at `/usr/local/tcpx/lib64` for compatibility:
-
+### Build
 ```bash
-# 1. Create the target directory
-sudo mkdir -p /usr/local/tcpx/lib64
-
-# 2. Copy TCPX libraries from the default installation path
-sudo cp -r /var/lib/tcpx/lib64/* /usr/local/tcpx/lib64/
-
-# 3. Create the NCCL plugin symlink
-cd /usr/local/tcpx/lib64
-sudo ln -sf libnccl-net.so libnccl-net-tcpx.so
+cd /home/daniel/uccl/p2p/tcpx
+make test_tcpx_perf -j4
 ```
 
-### Step 2: Set Environment Variables
+### Run Single Test (64MB)
 
+**Server (10.64.52.73):**
 ```bash
-# Set UCCL home directory
-export UCCL_HOME=/mnt/user_storage/uccl
-
-# Navigate to TCPX directory
-cd $UCCL_HOME/p2p/tcpx
+./bench_p2p.sh server 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
 ```
 
-### Step 3: Build
-
+**Client (10.64.113.74):**
 ```bash
-# Clean previous builds
-make clean
-
-# Build the test executable
-make test_tcpx_transfer
+./bench_p2p.sh client 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --size=67108864 --no-unix
 ```
 
-### Step 4: Configure Unpack Mode
+### Run Full Sweep (4KB → 256MB)
 
-Choose the unpack implementation:
-
+**Server:**
 ```bash
-# Option 1: D2D mode (recommended for production)
-export UCCL_TCPX_UNPACK_IMPL=d2d
-
-# Option 2: Host mode (for debugging)
-export UCCL_TCPX_UNPACK_IMPL=host
+./bench_p2p_sweep_server.sh 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
 ```
 
-### Step 5: Run Tests
-
-**Using the test script (recommended)**:
-
+**Client:**
 ```bash
-# Make script executable
-chmod +x run_tcpx_test.sh
-
-# Server (Node 1)
-./run_tcpx_test.sh transfer server
-
-# Client (Node 2)
-./run_tcpx_test.sh transfer <server_ip>
+./bench_p2p_sweep_client.sh 10.64.52.73 0 --ifaces=eth1,eth2,eth3,eth4 --no-unix
 ```
 
-**Manual execution**:
-
-```bash
-# Server (Node 1)
-./tests/test_tcpx_transfer server
-
-# Client (Node 2)
-./tests/test_tcpx_transfer client <server_ip>
-```
-
----
-
-## Quick Start (TL;DR)
-
-```bash
-# One-time setup
-sudo mkdir -p /usr/local/tcpx/lib64
-sudo cp -r /var/lib/tcpx/lib64/* /usr/local/tcpx/lib64/
-cd /usr/local/tcpx/lib64
-sudo ln -sf libnccl-net.so libnccl-net-tcpx.so
-
-# Build and run
-export UCCL_HOME=/mnt/user_storage/uccl
-cd $UCCL_HOME/p2p/tcpx
-make clean && make test_tcpx_transfer
-chmod +x run_tcpx_test.sh
-
-# Choose mode
-export UCCL_TCPX_UNPACK_IMPL=d2d  # or 'host'
-
-# Run test
-./run_tcpx_test.sh transfer server  # Node 1
-./run_tcpx_test.sh transfer <ip>    # Node 2
-```
-
----
-
-## Performance Testing
-
-### Run Performance Benchmark
-
-```bash
-# Build performance test
-make test_tcpx_perf
-
-# Server (node 0, GPU 0)
-export UCCL_TCPX_UNPACK_IMPL=kernel
-./tests/test_tcpx_perf server 0
-
-# Client (node 1, GPU 0)
-./tests/test_tcpx_perf client <server_ip> 0
-```
-
-**Test sizes**: 4KB, 16KB, 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB
-
-**Expected bandwidth**: 80-100 GB/s for large messages (>64MB) on H100+TCPX
-
-See [docs/PERFORMANCE_TESTING.md](docs/PERFORMANCE_TESTING.md) for detailed guide.
-
----
-
-## Environment Variables
-
-| Variable | Values | Description |
-|----------|--------|-------------|
-| `UCCL_TCPX_UNPACK_IMPL` | `kernel` (recommended) | GPU-based unpack ✅ |
-| | `d2d` | Device-to-device memcpy |
-| | `host` | Host-mediated transfer |
-| `UCCL_TCPX_LAUNCH_DEBUG` | `0` or `1` | Enable kernel debug output |
-| `UCCL_TCPX_WARMUP_ITERS` | `5` (default) | Warmup iterations for perf test |
-| `UCCL_TCPX_BENCH_ITERS` | `100` (default) | Benchmark iterations for perf test |
-
----
-
-## Expected Output
-
-**Successful test**:
-```
-[DEBUG] === TCPX GPU-to-GPU transfer test ===
-[DEBUG] Received data (23 bytes): Hello from TCPX client!
-[DEBUG] ✓ Data validation PASSED
-[DEBUG] Server test completed successfully
-```
+Results: `logs/p2p_sweep_YYYYMMDD_HHMMSS.md`
 
 ---
 
 ## Architecture
 
+### Key Components
+
+1. **test_tcpx_perf.cc** - Main performance test
+   - Server: Receives data with GPU kernel unpack (sliding window)
+   - Client: Sends data (sliding window)
+   
+2. **unpack_kernels.cu** - GPU kernel for unpacking scattered packets
+   - Copies scattered devmem-tcp buffers to contiguous GPU memory
+   
+3. **bench_p2p.sh** - Single test runner
+   - Configures TCPX environment
+   - Launches server/client with proper settings
+
+### Sliding Window Design
+
+Both server and client use sliding windows to avoid exhausting TCPX request pools:
+
+**TCPX Request Pool Limit:**
+- Each `tcpxComm` has **MAX_REQUESTS = 16** (hardcoded in TCPX plugin)
+- Independent of `NCCL_NSOCKS_PERTHREAD` or `NCCL_SOCKET_NTHREADS`
+
+**Server (Receiver):**
+```cpp
+constexpr int MAX_INFLIGHT = 16;  // Max concurrent recv requests
+// Window: irecv → kernel → event → irecv_consumed
 ```
-Client                          Server
-  │                               │
-  ├─ cudaMalloc(send_buf)        ├─ cudaMalloc(recv_buf)
-  ├─ tcpx_reg_mr(send_buf)       ├─ tcpx_reg_mr(recv_buf)
-  ├─ Write payload to GPU        │
-  ├─ tcpx_isend() ──────────────>├─ tcpx_irecv()
-  │                               ├─ Poll tcpx_test()
-  │                               ├─ Parse RX metadata
-  │                               ├─ buildDescriptorBlock()
-  │                               ├─ Execute unpack (D2D/host)
-  │                               ├─ Validate received data
-  └─ Cleanup                      └─ Cleanup
+
+**Client (Sender):**
+```cpp
+constexpr int MAX_INFLIGHT_SEND = 12;  // Max concurrent send requests (< 16)
+// Window: isend → test (auto-release when done)
 ```
+
+**Why Sliding Window?**
+- 64MB ÷ 512KB = 128 chunks
+- Without sliding window: 128 requests needed → exhausts pool at chunk 17
+- With sliding window: ≤ 12-16 requests in-flight → stable
 
 ---
-## Components
 
-### TCPX Interface Layer
-- `tcpx_interface.h`: C API definitions
-- `tcpx_impl.cc`: TCPX plugin wrapper implementation
+## Performance Optimizations
 
-### RX Descriptor Module
-- `rx_descriptor.h`: Header-only descriptor construction utilities
-  - Uses `tcpx::plugin::loadMeta` as descriptor type (avoids duplication)
-  - Provides `buildDescriptorBlock()` inline function
+### 1. Kernel Launch Optimization (100× speedup)
 
-### Device Unpack (`device/`)
-- `unpack_kernels.cu`: CUDA kernels for GPU-side unpack (experimental)
-- `unpack_launch.{h,cu}`: Kernel launcher and configuration (experimental)
-- **Note**: Device unpack is not included in this PR
+**Problem:** Original code created/destroyed stream and launcher per chunk
+```cpp
+// ❌ Wrong: 54ms overhead per chunk
+for each chunk:
+  cudaStreamCreate(&stream);
+  UnpackLauncher launcher(stream);
+  launcher.launchSync(desc);  // Synchronous!
+  cudaStreamDestroy(stream);
+```
 
-### Tests (`tests/`)
-- `test_tcpx_transfer.cc`: End-to-end GPU-to-GPU transfer validation
+**Solution:** Reuse stream and launcher, async launch
+```cpp
+// ✅ Correct: ~0.01ms per chunk
+cudaStreamCreate(&stream);
+UnpackLauncher* launcher = new UnpackLauncher(stream);
+for each chunk:
+  launcher->launch(desc);  // Async
+cudaStreamSynchronize(stream);  // Sync once at end
+```
+
+**Result:** Kernel mode performance now matches D2D mode (~20 GB/s on 4 NICs)
+
+### 2. Request Pool Management (Sliding Window)
+
+**Problem:** Batch send/recv exhausts TCPX request pool
+```cpp
+// ❌ Wrong: 128 chunks → 128 requests → pool exhausted
+for (128 chunks):
+  tcpx_isend(...);  // Allocates request
+  tcpx_test(...);   // Returns done=1, but request not immediately freed
+```
+
+**Solution:** Sliding window limits in-flight requests
+```cpp
+// ✅ Correct: ≤ 12 requests in-flight
+if (pending_reqs.size() >= MAX_INFLIGHT_SEND) {
+  wait_for_oldest();  // Drain one before issuing next
+}
+tcpx_isend(...);
+pending_reqs.push_back(req);
+```
+
+**Result:** Stable operation for any message size
+
+---
+
+## Environment Variables
+
+### TCPX Configuration
+```bash
+# Network interfaces (required)
+export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1,eth2,eth3,eth4
+
+# Port range (required)
+export NCCL_GPUDIRECTTCPX_PORT_BEGIN=50000
+export NCCL_GPUDIRECTTCPX_PORT_END=60000
+
+# Socket/thread config (optional, auto-detected for GCP)
+# Note: These control parallel sockets, NOT request pool size
+export NCCL_NSOCKS_PERTHREAD=1   # GCP default: 1
+export NCCL_SOCKET_NTHREADS=6    # GCP default: 6
+
+# Polling optimization (optional)
+export NCCL_GPUDIRECTTCPX_TX_COMPLETION_NANOSLEEP=0
+```
+
+### Test Options
+```bash
+./bench_p2p.sh [server|client] [server_ip] [gpu_id] [options]
+
+Options:
+  --ifaces=LIST      Comma-separated NIC list (default: eth1,eth2,eth3,eth4)
+  --size=BYTES       Total bytes per iteration (default: 67108864 = 64MB)
+  --iters=N          Iterations (default: 20)
+  --chunk=BYTES      Chunk size (default: 524288 = 512KB)
+  --impl=kernel|d2d  Unpack implementation (default: kernel)
+  --no-unix          Disable UNIX flow steering (default)
+```
 
 ---
 
 ## Troubleshooting
 
-### Plugin Not Found
+### "unable to allocate requests"
+**Cause:** Request pool exhausted (MAX_REQUESTS = 16 per comm)
+**Solution:** Sliding window is already implemented in both server and client
 
-**Error**: `Failed to load TCPX plugin`
+### "rx no cmsg" errors
+**Cause:** devmem-tcp not working
+**Solution:** 
+- Check kernel support: `dmesg | grep devmem`
+- Verify NICs support devmem-tcp
+- Use correct IP range (10.64.x.x for GCP)
 
-**Solution**:
-```bash
-# Verify plugin exists
-ls -la /usr/local/tcpx/lib64/libnccl-net-tcpx.so
+### Low performance (<5 GB/s on 4 NICs)
+**Possible causes:**
+1. Kernel mode using synchronous launch → Check code uses async `launch()`
+2. Single NIC only → Check `NCCL_GPUDIRECTTCPX_SOCKET_IFNAME`
+3. Small message size → Expected for <1MB messages
 
-# If not, run setup again
-sudo mkdir -p /usr/local/tcpx/lib64
-sudo cp -r /var/lib/tcpx/lib64/* /usr/local/tcpx/lib64/
-cd /usr/local/tcpx/lib64
-sudo ln -sf libnccl-net.so libnccl-net-tcpx.so
-```
-
-### Build Errors
-
-**Error**: `cuda_runtime.h: No such file or directory`
-
-**Solution**:
-```bash
-# Set CUDA_HOME
-export CUDA_HOME=/usr/local/cuda
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
-```
-
-### Connection Timeout
-
-**Error**: `Bootstrap connection timeout`
-
-**Solution**:
-- Verify server IP is correct
-- Check firewall allows TCP port 12345
-- Ensure both nodes can ping each other
-- Verify TCPX plugin is loaded on both nodes
-
-### Data Validation Failed
-
-**Error**: `Data validation FAILED`
-
-**Solution**:
-- Try host mode: `export UCCL_TCPX_UNPACK_IMPL=host`
-- Enable debug logging: `export UCCL_TCPX_DEBUG=1`
-- Check GPU memory is not corrupted
-- Verify CUDA driver version compatibility
-
+### Test hangs or times out
+**Possible causes:**
+1. Firewall blocking ports → Check port range 50000-60000
+2. Wrong server IP → Verify 10.64.52.73 reachable
+3. GPU not accessible → Check `nvidia-smi`
 
 ---
 
-## Implementation Details
+## File Structure
 
-### TCPX Plugin Integration
-
-Uses NCCL plugin v7 APIs:
-- `ncclNetPlugin_v7`: Main plugin interface
-- `ncclNet_v7_t`: Network operations (init, listen, accept, connect)
-- Device handle management for GPU memory registration
-
-### RX Metadata Format
-
-TCPX delivers fragments with metadata:
-```c
-struct loadMeta {
-  uint32_t src_off;  // Offset in bounce buffer
-  uint32_t len;      // Fragment length
-  uint64_t dst_off;  // Offset in destination buffer
-};
+```
+p2p/tcpx/
+├── README.md                    # This file
+├── Makefile                     # Build configuration
+├── bench_p2p.sh                 # Single test runner
+├── bench_p2p_sweep_*.sh         # Sweep test runners
+├── tests/
+│   ├── test_tcpx_perf.cc        # Main performance test
+│   └── test_tcpx_transfer.cc    # Basic transfer test
+├── device/
+│   ├── unpack_kernels.cu        # GPU unpack kernel
+│   └── unpack_launch.cu         # Kernel launcher
+├── include/
+│   ├── tcpx_interface.h         # TCPX API wrapper
+│   └── rx_descriptor.h          # RX descriptor structures
+├── logs/                        # Test logs
+└── docs/                        # Additional documentation
+    ├── PERF_DIARY.md            # Development history
+    └── TCPX_LOGIC_MAPPING.md    # TCPX internals
 ```
 
-### Memory Management
+---
 
-- **Bounce buffers**: TCPX plugin managed (devmem-tcp mapped GPU memory)
-- **Destination buffers**: Application allocated via `cudaMalloc`
-- **Descriptor blocks**: Host-side structures for unpack operations
+## Performance Expectations
+
+### 4-NIC Configuration (eth1-4, ~25 Gbps each)
+| Message Size | Expected BW | Notes |
+|--------------|-------------|-------|
+| 4KB - 64KB   | 1-5 GB/s    | Small message overhead |
+| 128KB - 1MB  | 5-15 GB/s   | Ramping up |
+| 2MB - 64MB   | 15-20 GB/s  | Peak performance |
+| 128MB+       | 18-22 GB/s  | Sustained peak |
+
+**Theoretical max:** 4 × 25 Gbps = 100 Gbps = 12.5 GB/s
+**Actual:** ~20 GB/s (160 Gbps) due to TCP overhead and multi-flow aggregation
 
 ---
 
+## Development History
 
-## Known Limitations
-
-1. **Kernel mode**: Direct GPU kernel access to devmem-tcp bounce buffers requires staging buffer workaround (not in this PR)
-
-2. **Multi-fragment optimization**: Current D2D implementation issues one copy per fragment
+See `docs/PERF_DIARY.md` for complete development history including:
+- Initial implementation and devmem-tcp setup
+- Kernel performance debugging (100× speedup)
+- Request pool exhaustion and sliding window solution
+- TCPX internals analysis
 
 ---
-
 
 ## References
 
-- [nccl-plugin-gpudirecttcpx](https://github.com/google/nccl-plugin-gpudirecttcpx)
-- [Linux devmem-tcp](https://lwn.net/Articles/945687/)
+- [Google nccl-plugin-gpudirecttcpx](https://github.com/google/nccl-plugin-gpudirecttcpx)
+- [NCCL Unpack Reference](https://github.com/NVIDIA/nccl/tree/master/src/device/network/unpack)
+- Linux devmem-tcp kernel documentation
+
+---
+
+**Last Updated:** 2025-10-02  
+**Status:** Production ready with sliding window optimization
 

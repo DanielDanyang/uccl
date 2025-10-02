@@ -260,7 +260,12 @@ int main(int argc, char** argv) {
     // Create stream and launcher once (outside the loop) for kernel mode
     cudaStream_t unpack_stream = nullptr;
     tcpx::device::UnpackLauncher* launcher_ptr = nullptr;
-    std::vector<void*> pending_reqs;  // defer irecv_consumed for kernel mode until stream sync
+
+    // Sliding window for async kernel mode: track in-flight requests with CUDA events
+    constexpr int MAX_INFLIGHT = 16;  // Max concurrent chunks (< TCPX request pool size)
+    std::vector<cudaEvent_t> events;
+    std::vector<void*> pending_reqs;
+    std::vector<int> pending_indices;
 
     if (!use_host_recv && impl == "kernel") {
       if (cudaStreamCreate(&unpack_stream) != cudaSuccess) {
@@ -278,7 +283,20 @@ int main(int argc, char** argv) {
       cfg.enable_profiling = false;
       cfg.use_small_kernel = true;
       launcher_ptr = new tcpx::device::UnpackLauncher(cfg);
-      std::cout << "[PERF][SERVER] Created persistent stream and launcher for kernel mode" << std::endl;
+
+      // Pre-create CUDA events for sliding window
+      events.resize(MAX_INFLIGHT);
+      for (int i = 0; i < MAX_INFLIGHT; ++i) {
+        if (cudaEventCreate(&events[i]) != cudaSuccess) {
+          std::cerr << "[ERROR] Failed to create CUDA event " << i << std::endl;
+          return 1;
+        }
+      }
+      pending_reqs.reserve(MAX_INFLIGHT);
+      pending_indices.reserve(MAX_INFLIGHT);
+
+      std::cout << "[PERF][SERVER] Created persistent stream, launcher, and "
+                << MAX_INFLIGHT << " events for async kernel mode" << std::endl;
     }
 
     double total_time_ms = 0.0;
@@ -289,7 +307,14 @@ int main(int argc, char** argv) {
 
       auto start = std::chrono::high_resolution_clock::now();
 
+      // Reset sliding window state for each iteration
+      if (!use_host_recv && impl == "kernel") {
+        pending_reqs.clear();
+        pending_indices.clear();
+      }
+
       size_t offset = 0;
+      int chunk_counter = 0;
       while (offset < test_size) {
         const size_t this_chunk = std::min(chunk_bytes, test_size - offset);
         void* dst_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(recv_buf) + offset);
@@ -355,12 +380,46 @@ int main(int argc, char** argv) {
 
           int lrc = 0;
           if (impl == "kernel") {
-            // Use persistent launcher with async launch (no sync here!)
+            // Sliding window: if we have MAX_INFLIGHT chunks in flight, wait for the oldest to complete
+            if (pending_reqs.size() >= MAX_INFLIGHT) {
+              int oldest_idx = pending_indices.front();
+              cudaEvent_t oldest_event = events[oldest_idx % MAX_INFLIGHT];
+
+              // Wait for the oldest chunk's kernel to complete
+              cudaError_t err = cudaEventSynchronize(oldest_event);
+              if (err != cudaSuccess) {
+                std::cerr << "[ERROR] cudaEventSynchronize failed: " << cudaGetErrorString(err) << std::endl;
+                break;
+              }
+
+              // Release the oldest chunk's request
+              void* oldest_req = pending_reqs.front();
+              tcpx_irecv_consumed(recv_comm, 1, oldest_req);
+
+              // Remove from sliding window
+              pending_reqs.erase(pending_reqs.begin());
+              pending_indices.erase(pending_indices.begin());
+            }
+
+            // Launch kernel for current chunk
             lrc = launcher_ptr->launch(desc_block);
             if (lrc != 0) {
               std::cerr << "[ERROR] Unpack kernel launch failed: " << lrc << std::endl;
               break;
             }
+
+            // Record event for this chunk
+            int event_idx = chunk_counter % MAX_INFLIGHT;
+            cudaError_t err = cudaEventRecord(events[event_idx], unpack_stream);
+            if (err != cudaSuccess) {
+              std::cerr << "[ERROR] cudaEventRecord failed: " << cudaGetErrorString(err) << std::endl;
+              break;
+            }
+
+            // Add to sliding window
+            pending_reqs.push_back(recv_request);
+            pending_indices.push_back(chunk_counter);
+
           } else if (impl == "d2d") {
             for (uint32_t i = 0; i < desc_block.count; ++i) {
               const auto& meta = desc_block.descriptors[i];
@@ -375,6 +434,7 @@ int main(int argc, char** argv) {
               }
             }
             if (lrc != 0) break;
+            tcpx_irecv_consumed(recv_comm, 1, recv_request);
           } else { // host gather
             std::vector<unsigned char> tmp(desc_block.total_bytes);
             size_t off = 0;
@@ -395,30 +455,31 @@ int main(int argc, char** argv) {
               std::cerr << "[ERROR] Host gather HtoD failed" << std::endl;
               break;
             }
-          }
-
-          // Defer consume for kernel (async) until stream sync; immediate for others
-          if (impl == "kernel") {
-            pending_reqs.push_back(recv_request);
-          } else {
             tcpx_irecv_consumed(recv_comm, 1, recv_request);
           }
           offset += this_chunk;
+          chunk_counter++;
         }
       }
 
-      // Sync stream once per iteration (after all chunks) for kernel mode
+      // Drain remaining in-flight chunks for kernel mode
       if (!use_host_recv && impl == "kernel") {
-        cudaError_t err = cudaStreamSynchronize(unpack_stream);
-        if (err != cudaSuccess) {
-          std::cerr << "[ERROR] cudaStreamSynchronize failed: " << cudaGetErrorString(err) << std::endl;
-          break;
+        while (!pending_reqs.empty()) {
+          int oldest_idx = pending_indices.front();
+          cudaEvent_t oldest_event = events[oldest_idx % MAX_INFLIGHT];
+
+          cudaError_t err = cudaEventSynchronize(oldest_event);
+          if (err != cudaSuccess) {
+            std::cerr << "[ERROR] cudaEventSynchronize (drain) failed: " << cudaGetErrorString(err) << std::endl;
+            break;
+          }
+
+          void* oldest_req = pending_reqs.front();
+          tcpx_irecv_consumed(recv_comm, 1, oldest_req);
+
+          pending_reqs.erase(pending_reqs.begin());
+          pending_indices.erase(pending_indices.begin());
         }
-        // Now it is safe to release bounce buffers for all kernel chunks
-        for (void* req_ptr : pending_reqs) {
-          tcpx_irecv_consumed(recv_comm, 1, req_ptr);
-        }
-        pending_reqs.clear();
       }
 
       auto end = std::chrono::high_resolution_clock::now();
@@ -433,7 +494,7 @@ int main(int argc, char** argv) {
     std::cout << "[PERF] Avg: " << std::fixed << std::setprecision(3) << avg_ms << " ms, "
               << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
 
-    // Cleanup persistent launcher and stream
+    // Cleanup persistent launcher, stream, and events
     if (launcher_ptr) {
       delete launcher_ptr;
       launcher_ptr = nullptr;
@@ -441,6 +502,9 @@ int main(int argc, char** argv) {
     if (unpack_stream) {
       cudaStreamDestroy(unpack_stream);
       unpack_stream = nullptr;
+    }
+    for (auto& evt : events) {
+      cudaEventDestroy(evt);
     }
 
     tcpx_dereg_mr(recv_comm, recv_mhandle);
@@ -521,6 +585,14 @@ int main(int argc, char** argv) {
     }
     std::cout << "[PERF][CLIENT] Send buffer registered successfully, mhandle=" << send_mhandle << std::endl;
 
+    // Sliding window for send requests: TCPX has MAX_REQUESTS=16 per comm
+    // Keep in-flight requests < 16 to avoid "unable to allocate requests" error
+    constexpr int MAX_INFLIGHT_SEND = 12;  // Leave some margin (< 16)
+    std::vector<void*> pending_send_reqs;
+    pending_send_reqs.reserve(MAX_INFLIGHT_SEND);
+
+    std::cout << "[PERF][CLIENT] Using sliding window with MAX_INFLIGHT_SEND=" << MAX_INFLIGHT_SEND << std::endl;
+
     double total_time_ms = 0.0;
 
     for (int iter = 0; iter < iterations; ++iter) {
@@ -528,7 +600,11 @@ int main(int argc, char** argv) {
                 << ", chunk_bytes=" << chunk_bytes << std::endl;
       auto start = std::chrono::high_resolution_clock::now();
 
+      // Reset sliding window for each iteration
+      pending_send_reqs.clear();
+
       size_t offset = 0;
+      int chunk_counter = 0;
       while (offset < test_size) {
         const size_t this_chunk = std::min(chunk_bytes, test_size - offset);
         void* src_ptr = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(send_buf) + offset);
@@ -536,21 +612,51 @@ int main(int argc, char** argv) {
         const int tag = kTransferTag + static_cast<int>(iter) * 10000 + static_cast<int>(chunk_idx);
         std::cout << "[PERF][CLIENT] chunk_idx=" << chunk_idx << " tag=" << tag
                   << " size=" << this_chunk << " offset=" << offset << std::endl;
+
+        // Sliding window: if full, wait for oldest send to complete
+        if (pending_send_reqs.size() >= MAX_INFLIGHT_SEND) {
+          void* oldest_req = pending_send_reqs.front();
+          int done = 0, sent_size = 0;
+          // Poll until oldest send completes
+          for (int poll = 0; poll < 1000000 && !done; ++poll) {
+            tcpx_test(oldest_req, &done, &sent_size);
+            if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
+          }
+          if (!done) {
+            std::cerr << "[ERROR] Send timeout (sliding window drain) at iteration " << iter
+                      << " chunk=" << chunk_counter << std::endl;
+            break;
+          }
+          // Send request is auto-released by tcpx_test() when done=1
+          pending_send_reqs.erase(pending_send_reqs.begin());
+        }
+
+        // Issue send for current chunk
         void* send_request = nullptr;
         if (tcpx_isend(send_comm, src_ptr, static_cast<int>(this_chunk), tag, send_mhandle, &send_request) != 0) {
-          std::cerr << "[ERROR] tcpx_isend failed (chunk)" << std::endl;
+          std::cerr << "[ERROR] tcpx_isend failed (chunk " << chunk_idx << ")" << std::endl;
           break;
         }
+
+        // Add to sliding window
+        pending_send_reqs.push_back(send_request);
+        offset += this_chunk;
+        chunk_counter++;
+      }
+
+      // Drain remaining in-flight sends
+      while (!pending_send_reqs.empty()) {
+        void* oldest_req = pending_send_reqs.front();
         int done = 0, sent_size = 0;
         for (int poll = 0; poll < 1000000 && !done; ++poll) {
-          tcpx_test(send_request, &done, &sent_size);
+          tcpx_test(oldest_req, &done, &sent_size);
           if (!done) std::this_thread::sleep_for(std::chrono::microseconds(10));
         }
         if (!done) {
-          std::cerr << "[ERROR] Send timeout at iteration " << iter << " offset=" << offset << std::endl;
+          std::cerr << "[ERROR] Send timeout (final drain) at iteration " << iter << std::endl;
           break;
         }
-        offset += this_chunk;
+        pending_send_reqs.erase(pending_send_reqs.begin());
       }
 
       auto end = std::chrono::high_resolution_clock::now();
