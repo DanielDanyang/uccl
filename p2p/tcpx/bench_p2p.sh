@@ -127,6 +127,10 @@ export NCCL_CROSS_NIC=0
 export NCCL_NET_GDR_LEVEL=PIX
 export NCCL_P2P_PXN_LEVEL=0
 
+# NCCL debug output (to verify TCPX configuration)
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=NET
+
 if [[ ${USE_UNIX} -eq 1 ]]; then
   export NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX="${UNIX_PREFIX}"
   if [[ ! -d "${UNIX_PREFIX}" ]]; then
