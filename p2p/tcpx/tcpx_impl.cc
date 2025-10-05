@@ -201,6 +201,28 @@ int tcpx_accept_v5(void* listen_comm, void** recv_comm,
   return rc;
 }
 
+// Get device properties (network interface name, speed, etc.)
+int tcpx_get_properties(int dev, struct tcpx_net_properties* props) {
+  if (!g_net || !g_net->getProperties) {
+    tcpx_dbg("tcpx_get_properties: plugin not initialized or getProperties not available");
+    return -1;
+  }
+
+  tcpx_dbg("tcpx_get_properties: dev=%d", dev);
+
+  // Call plugin's getProperties (it expects the same structure layout)
+  int rc = g_net->getProperties(dev, props);
+
+  if (rc == 0 && props->name) {
+    tcpx_dbg("tcpx_get_properties: rc=%d name=%s speed=%d Mbps",
+             rc, props->name, props->speed);
+  } else {
+    tcpx_dbg("tcpx_get_properties: rc=%d", rc);
+  }
+
+  return rc;
+}
+
 // Memory registration implementation
 int tcpx_reg_mr(void* comm, void* data, size_t size, int type, void** mhandle) {
   if (!g_net || !g_net->regMr) {

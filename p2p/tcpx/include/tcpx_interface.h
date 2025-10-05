@@ -22,6 +22,21 @@ extern "C" {
 int tcpx_get_device_count();
 int tcpx_load_plugin(char const* plugin_path);
 
+// Device properties
+struct tcpx_net_properties {
+  char* name;       // Network interface name (e.g., "eth1")
+  char* pci_path;   // PCI path
+  int guid;         // Device GUID
+  int ptr_support;  // Supported pointer types (NCCL_PTR_HOST | NCCL_PTR_CUDA)
+  int speed;        // Link speed in Mbps
+  int port;         // Port number
+  int max_comms;    // Maximum concurrent communications
+  float latency;    // Estimated latency in microseconds
+  int max_recvs;    // Maximum concurrent receives
+};
+
+int tcpx_get_properties(int dev, struct tcpx_net_properties* props);
+
 // Connection management
 int tcpx_listen(int dev, void* handle, void** listen_comm);
 int tcpx_connect_v5(int dev, void* handle, void** send_comm, void** send_dev_handle);
