@@ -49,6 +49,11 @@ test_tcpx_transfer_multi: $(DEVICE_OBJS) $(CORE_OBJS)
 	@echo "Building test_tcpx_transfer_multi..."
 	$(NVCC) $(NVCCFLAGS) -o tests/test_tcpx_transfer_multi tests/test_tcpx_transfer_multi.cc tcpx_impl.cc $(DEVICE_OBJS) $(CORE_OBJS) $(LIBS) $(CUDA_LIBS)
 
+# Multi-channel performance test
+test_tcpx_perf_multi: $(DEVICE_OBJS) $(CORE_OBJS)
+	@echo "Building test_tcpx_perf_multi..."
+	$(NVCC) $(NVCCFLAGS) -o tests/test_tcpx_perf_multi tests/test_tcpx_perf_multi.cc tcpx_impl.cc $(DEVICE_OBJS) $(CORE_OBJS) $(LIBS) $(CUDA_LIBS)
+
 # Performance benchmark test
 test_tcpx_perf: $(DEVICE_OBJS) $(CORE_OBJS)
 	@echo "Building test_tcpx_perf..."
@@ -60,7 +65,7 @@ test_modules: $(CORE_OBJS)
 	$(CXX) $(CXXFLAGS) -o tests/test_modules tests/test_modules.cc tcpx_impl.cc $(CORE_OBJS) $(LIBS) $(CUDA_LIBS)
 
 # Build targets
-all: core test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_modules
+all: core test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_tcpx_perf_multi test_modules
 
 # All tests (only integration test remains)
 all_tests: all
@@ -91,9 +96,9 @@ check:
 clean:
 	@echo "Cleaning build artifacts..."
 	@echo "Removing executable files..."
-	rm -f tests/test_tcpx_transfer tests/test_tcpx_transfer_multi tests/test_tcpx_perf tests/test_modules
+	rm -f tests/test_tcpx_transfer tests/test_tcpx_transfer_multi tests/test_tcpx_perf tests/test_tcpx_perf_multi tests/test_modules
 	@echo "Removing object files..."
 	rm -f $(DEVICE_OBJS) $(CORE_OBJS) *.o
 	@echo "Clean completed. Source files preserved."
 
-.PHONY: all core quick check clean all_tests test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_modules
+.PHONY: all core quick check clean all_tests test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_tcpx_perf_multi test_modules

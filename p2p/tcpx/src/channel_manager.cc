@@ -91,10 +91,11 @@ ChannelResources& ChannelManager::get_channel(int idx) {
   }
 
   if (idx < 0 || idx >= num_channels_) {
-    std::cerr << "[ChannelManager] ERROR: Invalid channel index " << idx
+    std::cerr << "[ChannelManager] FATAL: Invalid channel index " << idx
               << " (valid range: 0-" << (num_channels_ - 1) << ")" << std::endl;
-    std::cerr << "[ChannelManager] Returning channel 0 as fallback" << std::endl;
-    return channels_[0];  // Safe fallback since we know channels_ is not empty
+    std::cerr << "[ChannelManager] This indicates a configuration bug (env asked for more channels than available)" << std::endl;
+    std::cerr << "[ChannelManager] Aborting to make the bug obvious instead of silently using channel 0" << std::endl;
+    std::abort();  // Fail fast instead of masking the bug
   }
 
   return channels_[idx];
