@@ -16,6 +16,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 #include "tcpx_handles.h"
 
 // Bootstrap protocol constants
