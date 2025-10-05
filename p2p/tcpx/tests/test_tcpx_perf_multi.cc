@@ -55,6 +55,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <thread>
@@ -333,11 +334,21 @@ int main(int argc, char** argv) {
     constexpr int MAX_INFLIGHT_PER_CHANNEL = 16;
 
     // 每个 channel 的滑动窗口状态
+    struct PostedChunk {
+      void* request = nullptr;
+      void* dst_ptr = nullptr;
+      size_t bytes = 0;
+      size_t offset = 0;
+      int tag = 0;
+      int global_idx = 0;
+    };
+
     struct ChannelWindow {
       std::vector<cudaEvent_t> events;        // CUDA events（用于跟踪 kernel 完成）
-      std::vector<void*> pending_reqs;        // 待完成的 TCPX 请求
+      std::vector<void*> pending_reqs;        // Kernel 已提交但尚未 consumed 的 TCPX 请求
       std::vector<int> pending_indices;       // 待完成的 chunk 索引
       int chunk_counter = 0;                  // 该 channel 处理的 chunk 计数
+      std::deque<PostedChunk> inflight_recvs; // 已经 post 但尚未解包的 chunk
     };
 
     std::vector<ChannelWindow> channel_windows(num_channels);
@@ -358,6 +369,128 @@ int main(int argc, char** argv) {
       std::cout << "[PERF] Created " << MAX_INFLIGHT_PER_CHANNEL
                 << " events per channel for async kernel mode" << std::endl;
     }
+
+    auto process_completed_chunk = [&](int channel_id, ChannelResources& ch,
+                                        ChannelWindow& win, bool blocking) -> bool {
+      const int kSleepMicros = 10;
+
+      while (!win.inflight_recvs.empty()) {
+        auto& entry = win.inflight_recvs.front();
+        int done = 0;
+        int received_size = 0;
+        tcpx_test(entry.request, &done, &received_size);
+        if (!done) {
+          if (blocking) {
+            std::this_thread::sleep_for(std::chrono::microseconds(kSleepMicros));
+            continue;
+          }
+          break;
+        }
+
+        std::cout << "[DEBUG][SERVER] Chunk " << entry.global_idx
+                  << " recv completed (received_size=" << received_size << ")" << std::endl;
+
+        auto* rx_req = reinterpret_cast<tcpx::plugin::tcpxRequest*>(entry.request);
+        auto* dev_handle_struct = reinterpret_cast<tcpx::plugin::NcclNetDeviceHandle*>(ch.recv_dev_handle);
+
+        if (!rx_req || !dev_handle_struct || !rx_req->unpack_slot.mem || !rx_req->unpack_slot.cnt) {
+          std::cerr << "[ERROR] Missing TCPX metadata for unpack (channel "
+                    << channel_id << ", chunk " << entry.global_idx << ")" << std::endl;
+          return false;
+        }
+
+        uint64_t frag_count = *(rx_req->unpack_slot.cnt);
+        std::cout << "[DEBUG][SERVER] Chunk " << entry.global_idx << " has "
+                  << frag_count << " fragments" << std::endl;
+
+        if (frag_count == 0 || frag_count > MAX_UNPACK_DESCRIPTORS) {
+          std::cerr << "[ERROR] Invalid fragment count: " << frag_count
+                    << " (cnt_cache=" << rx_req->unpack_slot.cnt_cache << ")" << std::endl;
+          return false;
+        }
+
+        tcpx::plugin::unpackNetDeviceHandle dev_handle{};
+        if (!cuda_check(cuMemcpyDtoH(&dev_handle,
+                                     reinterpret_cast<CUdeviceptr>(dev_handle_struct->handle),
+                                     sizeof(dev_handle)),
+                        "cuMemcpyDtoH device handle")) {
+          return false;
+        }
+
+        auto* meta_entries = static_cast<tcpx::plugin::loadMeta*>(rx_req->unpack_slot.mem);
+        tcpx::rx::UnpackDescriptorBlock desc_block;
+        tcpx::rx::buildDescriptorBlock(meta_entries, static_cast<uint32_t>(frag_count),
+                                       dev_handle.bounce_buf, entry.dst_ptr, desc_block);
+        desc_block.ready_flag = rx_req->unpack_slot.cnt;
+        desc_block.ready_threshold = frag_count;
+
+        int lrc = 0;
+
+        if (impl == "kernel") {
+          std::cout << "[DEBUG][SERVER] Launching unpack kernel for chunk "
+                    << entry.global_idx << " (channel " << channel_id
+                    << ", descriptors=" << desc_block.count << ")" << std::endl;
+
+          lrc = launcher_ptr->launch(desc_block);
+          if (lrc != 0) {
+            std::cerr << "[ERROR] Unpack kernel launch failed: " << lrc << std::endl;
+            return false;
+          }
+
+          int event_idx = win.chunk_counter % MAX_INFLIGHT_PER_CHANNEL;
+          if (!cuda_check(cudaEventRecord(win.events[event_idx], unpack_stream), "cudaEventRecord")) {
+            return false;
+          }
+
+          win.pending_reqs.push_back(entry.request);
+          win.pending_indices.push_back(win.chunk_counter);
+          win.chunk_counter++;
+
+        } else if (impl == "d2d") {
+          for (uint32_t i = 0; i < desc_block.count; ++i) {
+            const auto& meta = desc_block.descriptors[i];
+            CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
+                reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
+            CUdeviceptr dst_ptr_frag = static_cast<CUdeviceptr>(
+                reinterpret_cast<uintptr_t>(desc_block.dst_buffer) + meta.dst_off);
+
+            if (!cuda_check(cuMemcpyDtoD(dst_ptr_frag, src_ptr, meta.len), "cuMemcpyDtoD")) {
+              lrc = -1;
+              break;
+            }
+          }
+          if (lrc != 0) return false;
+
+          tcpx_irecv_consumed(ch.recv_comm, 1, entry.request);
+
+        } else {  // host gather
+          std::vector<unsigned char> tmp(desc_block.total_bytes);
+          size_t host_off = 0;
+          for (uint32_t i = 0; i < desc_block.count; ++i) {
+            const auto& meta = desc_block.descriptors[i];
+            CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
+                reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
+            if (!cuda_check(cuMemcpyDtoH(tmp.data() + host_off, src_ptr, meta.len), "cuMemcpyDtoH")) {
+              lrc = -1;
+              break;
+            }
+            host_off += meta.len;
+          }
+          if (lrc != 0) return false;
+
+          if (!cuda_check(cuMemcpyHtoD(static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(desc_block.dst_buffer)),
+                                       tmp.data(), tmp.size()), "cuMemcpyHtoD")) {
+            return false;
+          }
+
+          tcpx_irecv_consumed(ch.recv_comm, 1, entry.request);
+        }
+
+        win.inflight_recvs.pop_front();
+      }
+
+      return true;
+    };
 
     // ==========================================================================
     // 步骤 10: 性能测试主循环
@@ -403,7 +536,21 @@ int main(int argc, char** argv) {
 
         std::cout << "[DEBUG][SERVER] chunk=" << global_chunk_idx << " channel=" << channel_id
                   << " tag=" << tag << " size=" << this_chunk << " offset=" << offset
-                  << " pending=" << win.pending_reqs.size() << "/" << MAX_INFLIGHT_PER_CHANNEL << std::endl;
+                  << " pending_kernels=" << win.pending_reqs.size() << "/" << MAX_INFLIGHT_PER_CHANNEL
+                  << " inflight_recvs=" << win.inflight_recvs.size() << std::endl;
+
+        // 确保 inflight recv 数量不会超过 TCPX 限制
+        bool drain_ok = true;
+        while (win.inflight_recvs.size() >= MAX_INFLIGHT_PER_CHANNEL) {
+          if (!process_completed_chunk(channel_id, ch, win, /*blocking=*/true)) {
+            std::cerr << "[ERROR] Failed while waiting for inflight recv to drain" << std::endl;
+            drain_ok = false;
+            break;
+          }
+        }
+        if (!drain_ok || win.inflight_recvs.size() >= MAX_INFLIGHT_PER_CHANNEL) {
+          break;
+        }
 
         // ======================================================================
         // 【关键修复】滑动窗口检查 - 必须在 tcpx_irecv 之前！
@@ -464,154 +611,18 @@ int main(int argc, char** argv) {
           break;
         }
 
-        std::cout << "[DEBUG][SERVER] tcpx_irecv posted, request=" << recv_request << std::endl;
+        PostedChunk posted;
+        posted.request = recv_request;
+        posted.dst_ptr = dst_ptr;
+        posted.bytes = this_chunk;
+        posted.offset = offset;
+        posted.tag = tag;
+        posted.global_idx = global_chunk_idx;
+        win.inflight_recvs.push_back(std::move(posted));
 
-        // ======================================================================
-        // 【关键修复】轮询等待接收完成，然后立即发起 unpack kernel（异步）
-        // 不等待 kernel 完成，让多个 kernels 并行执行
-        // ======================================================================
-
-        int done = 0, received_size = 0;
-        std::cout << "[DEBUG][SERVER] Polling for chunk " << global_chunk_idx << " recv completion..." << std::endl;
-        int poll_count = 0;
-        while (!done) {
-          tcpx_test(recv_request, &done, &received_size);
-          if (!done) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-            poll_count++;
-            if (poll_count % 1000 == 0) {
-              std::cout << "[DEBUG][SERVER] Still polling chunk " << global_chunk_idx
-                        << " (poll_count=" << poll_count << ")" << std::endl;
-            }
-          }
-        }
-        std::cout << "[DEBUG][SERVER] Chunk " << global_chunk_idx << " recv completed after "
-                  << poll_count << " polls, received_size=" << received_size << std::endl;
-
-        // ======================================================================
-        // Unpack 逻辑：将分散的 bounce buffer 数据拷贝到连续的目标内存
-        // ======================================================================
-
-        // 【关键】将 recv_request 转换为 TCPX 内部结构
-        auto* rx_req = reinterpret_cast<tcpx::plugin::tcpxRequest*>(recv_request);
-        auto* dev_handle_struct = reinterpret_cast<tcpx::plugin::NcclNetDeviceHandle*>(ch.recv_dev_handle);
-
-        if (!rx_req || !dev_handle_struct || !rx_req->unpack_slot.mem || !rx_req->unpack_slot.cnt) {
-          std::cerr << "[ERROR] Missing TCPX metadata for unpack" << std::endl;
+        if (!process_completed_chunk(channel_id, ch, win, /*blocking=*/false)) {
+          std::cerr << "[ERROR] Failed to process completed chunks" << std::endl;
           break;
-        }
-
-        // 【重要】读取 fragment 数量
-        uint64_t frag_count = *(rx_req->unpack_slot.cnt);
-
-        std::cout << "[DEBUG][SERVER] Chunk " << global_chunk_idx << " has " << frag_count
-                  << " fragments to unpack" << std::endl;
-
-        if (frag_count == 0 || frag_count > MAX_UNPACK_DESCRIPTORS) {
-          std::cerr << "[ERROR] Invalid fragment count: " << frag_count
-                    << " (cnt_cache=" << rx_req->unpack_slot.cnt_cache << ")" << std::endl;
-          break;
-        }
-
-        // 【关键】读取 device handle
-        tcpx::plugin::unpackNetDeviceHandle dev_handle{};
-        if (!cuda_check(cuMemcpyDtoH(&dev_handle, reinterpret_cast<CUdeviceptr>(dev_handle_struct->handle),
-                                     sizeof(dev_handle)), "cuMemcpyDtoH device handle")) {
-          break;
-        }
-
-        // 【关键】构建 unpack descriptor block
-        auto* meta_entries = static_cast<tcpx::plugin::loadMeta*>(rx_req->unpack_slot.mem);
-        tcpx::rx::UnpackDescriptorBlock desc_block;
-        tcpx::rx::buildDescriptorBlock(meta_entries, static_cast<uint32_t>(frag_count),
-                                       dev_handle.bounce_buf, dst_ptr, desc_block);
-
-        desc_block.ready_flag = rx_req->unpack_slot.cnt;
-        desc_block.ready_threshold = frag_count;
-
-        // ====================================================================
-        // 执行 Unpack（根据选择的实现方式）
-        // ====================================================================
-
-        int lrc = 0;
-
-        if (impl == "kernel") {
-          // ==================================================================
-          // Kernel 模式：使用 GPU kernel 解包（推荐）
-          // ==================================================================
-
-          std::cout << "[DEBUG][SERVER] Launching unpack kernel for chunk " << global_chunk_idx
-                    << " (channel " << channel_id << ", " << desc_block.count << " descriptors)" << std::endl;
-
-          lrc = launcher_ptr->launch(desc_block);
-          if (lrc != 0) {
-            std::cerr << "[ERROR] Unpack kernel launch failed: " << lrc << std::endl;
-            break;
-          }
-
-          // 记录 CUDA event
-          int event_idx = win.chunk_counter % MAX_INFLIGHT_PER_CHANNEL;
-          if (!cuda_check(cudaEventRecord(win.events[event_idx], unpack_stream), "cudaEventRecord")) {
-            break;
-          }
-
-          std::cout << "[DEBUG][SERVER] Chunk " << global_chunk_idx << " kernel launched, event_idx="
-                    << event_idx << ", adding to window (counter=" << win.chunk_counter << ")" << std::endl;
-
-          // 将当前 chunk 加入该 channel 的滑动窗口
-          win.pending_reqs.push_back(recv_request);
-          win.pending_indices.push_back(win.chunk_counter);
-          win.chunk_counter++;
-
-        } else if (impl == "d2d") {
-          // ==================================================================
-          // D2D 模式：使用 cuMemcpyDtoD 逐个 fragment 拷贝
-          // ==================================================================
-
-          for (uint32_t i = 0; i < desc_block.count; ++i) {
-            const auto& meta = desc_block.descriptors[i];
-            CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
-                reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
-            CUdeviceptr dst_ptr_frag = static_cast<CUdeviceptr>(
-                reinterpret_cast<uintptr_t>(desc_block.dst_buffer) + meta.dst_off);
-
-            if (!cuda_check(cuMemcpyDtoD(dst_ptr_frag, src_ptr, meta.len), "cuMemcpyDtoD")) {
-              lrc = -1;
-              break;
-            }
-          }
-          if (lrc != 0) break;
-
-          // D2D 模式是同步的，立即释放请求
-          tcpx_irecv_consumed(ch.recv_comm, 1, recv_request);
-
-        } else {  // host gather
-          // ==================================================================
-          // Host Gather 模式：DtoH → gather → HtoD（最慢，仅用于调试）
-          // ==================================================================
-
-          std::vector<unsigned char> tmp(desc_block.total_bytes);
-          size_t off = 0;
-
-          for (uint32_t i = 0; i < desc_block.count; ++i) {
-            const auto& meta = desc_block.descriptors[i];
-            CUdeviceptr src_ptr = static_cast<CUdeviceptr>(
-                reinterpret_cast<uintptr_t>(desc_block.bounce_buffer) + meta.src_off);
-            if (!cuda_check(cuMemcpyDtoH(tmp.data() + off, src_ptr, meta.len), "cuMemcpyDtoH")) {
-              lrc = -1;
-              break;
-            }
-            off += meta.len;
-          }
-          if (lrc != 0) break;
-
-          if (!cuda_check(cuMemcpyHtoD(static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(desc_block.dst_buffer)),
-                                       tmp.data(), tmp.size()), "cuMemcpyHtoD")) {
-            break;
-          }
-
-          // Host gather 是同步的，立即释放请求
-          tcpx_irecv_consumed(ch.recv_comm, 1, recv_request);
         }
 
         offset += this_chunk;
@@ -623,6 +634,17 @@ int main(int argc, char** argv) {
       // ========================================================================
 
       if (impl == "kernel") {
+        for (int ch = 0; ch < num_channels; ++ch) {
+          ChannelResources& channel = mgr.get_channel(ch);
+          ChannelWindow& win = channel_windows[ch];
+          while (!win.inflight_recvs.empty()) {
+            if (!process_completed_chunk(ch, channel, win, /*blocking=*/true)) {
+              std::cerr << "[ERROR] Failed to drain inflight recvs for channel " << ch << std::endl;
+              break;
+            }
+          }
+        }
+
         for (int ch = 0; ch < num_channels; ++ch) {
           ChannelResources& channel = mgr.get_channel(ch);
           ChannelWindow& win = channel_windows[ch];
@@ -965,4 +987,3 @@ int main(int argc, char** argv) {
 
   return 0;
 }  // end of main
-
