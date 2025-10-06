@@ -180,12 +180,36 @@ int main(int argc, char** argv) {
   // ============================================================================
 
   int ndev = tcpx_get_device_count();
-  if (ndev <= 0 || gpu_id >= ndev) {
-    std::cerr << "[ERROR] Invalid GPU or TCPX not available" << std::endl;
+  if (ndev <= 0) {
+    std::cerr << "[ERROR] No TCPX net devices available" << std::endl;
+    return 1;
+  }
+
+  int cuda_device_count = 0;
+  cudaError_t cuda_count_err = cudaGetDeviceCount(&cuda_device_count);
+  if (cuda_count_err != cudaSuccess) {
+    std::cerr << "[ERROR] Unable to query CUDA device count: "
+              << cudaGetErrorString(cuda_count_err) << std::endl;
+    return 1;
+  }
+
+  if (gpu_id < 0 || gpu_id >= cuda_device_count) {
+    std::cerr << "[ERROR] Invalid GPU id " << gpu_id
+              << " (available GPUs: " << cuda_device_count << ")" << std::endl;
     return 1;
   }
 
   std::cout << "[PERF] TCPX devices: " << ndev << std::endl;
+  std::cout << "[PERF] CUDA devices: " << cuda_device_count << std::endl;
+
+  int bootstrap_port_base = getEnvInt("UCCL_TCPX_BOOTSTRAP_PORT_BASE", ::kBootstrapPort);
+  int bootstrap_port = bootstrap_port_base + gpu_id;
+  if (bootstrap_port <= 0 || bootstrap_port >= 65535) {
+    std::cerr << "[ERROR] Computed bootstrap port " << bootstrap_port
+              << " out of range (base=" << bootstrap_port_base << ")" << std::endl;
+    return 1;
+  }
+  std::cout << "[PERF] Bootstrap port: " << bootstrap_port << std::endl;
 
   // ============================================================================
   // SERVER 端逻辑
@@ -215,7 +239,7 @@ int main(int argc, char** argv) {
     // ==========================================================================
 
     int bootstrap_fd = -1;
-    if (bootstrap_server_create(::kBootstrapPort, &bootstrap_fd) != 0) {
+    if (bootstrap_server_create(bootstrap_port, &bootstrap_fd) != 0) {
       std::cerr << "[ERROR] bootstrap_server_create failed" << std::endl;
       return 1;
     }
@@ -750,7 +774,7 @@ int main(int argc, char** argv) {
     // ==========================================================================
 
     int bootstrap_fd = -1;
-    if (bootstrap_client_connect(server_ip.c_str(), ::kBootstrapPort, &bootstrap_fd) != 0) {
+    if (bootstrap_client_connect(server_ip.c_str(), bootstrap_port, &bootstrap_fd) != 0) {
       std::cerr << "[ERROR] bootstrap_client_connect failed" << std::endl;
       return 1;
     }

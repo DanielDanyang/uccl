@@ -36,13 +36,16 @@
 #include <unistd.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <thread>
-#include <algorithm>
+#include <utility>
 #include <vector>
 
 
@@ -73,6 +76,78 @@ int getEnvInt(const char* name, int def) {
 size_t getEnvSize(const char* name, size_t def) {
   const char* v = std::getenv(name);
   return v ? static_cast<size_t>(std::atoll(v)) : def;
+}
+
+std::string trim_copy(const std::string& s) {
+  const char* whitespace = " \t\n\r";
+  const auto begin = s.find_first_not_of(whitespace);
+  if (begin == std::string::npos) return "";
+  const auto end = s.find_last_not_of(whitespace);
+  return s.substr(begin, end - begin + 1);
+}
+
+std::vector<std::string> split_csv_list(const std::string& value) {
+  std::vector<std::string> tokens;
+  if (value.empty()) return tokens;
+
+  std::stringstream ss(value);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    const auto token = trim_copy(item);
+    if (!token.empty()) tokens.push_back(token);
+  }
+  return tokens;
+}
+
+struct NetDeviceSelection {
+  int index = 0;
+  std::string name;
+  std::vector<std::pair<int, std::string>> devices;
+};
+
+NetDeviceSelection resolve_net_device(int net_device_count) {
+  NetDeviceSelection selection;
+  selection.devices.reserve(net_device_count);
+
+  for (int dev = 0; dev < net_device_count; ++dev) {
+    tcpx_net_properties props{};
+    if (tcpx_get_properties(dev, &props) == 0) {
+      selection.devices.emplace_back(dev, props.name ? std::string(props.name) : std::string());
+    } else {
+      selection.devices.emplace_back(dev, std::string());
+    }
+  }
+
+  std::vector<std::string> desired;
+  if (const char* override_env = std::getenv("UCCL_TCPX_NET_DEVICE")) {
+    const auto tokens = split_csv_list(override_env);
+    desired.insert(desired.end(), tokens.begin(), tokens.end());
+  }
+  if (desired.empty()) {
+    if (const char* ifaces_env = std::getenv("NCCL_GPUDIRECTTCPX_SOCKET_IFNAME")) {
+      const auto tokens = split_csv_list(ifaces_env);
+      desired.insert(desired.end(), tokens.begin(), tokens.end());
+    }
+  }
+
+  for (const auto& want : desired) {
+    for (const auto& dev : selection.devices) {
+      if (!want.empty() && want == dev.second) {
+        selection.index = dev.first;
+        selection.name = dev.second;
+        return selection;
+      }
+    }
+  }
+
+  if (!selection.devices.empty()) {
+    selection.index = selection.devices.front().first;
+    selection.name = selection.devices.front().second;
+  } else {
+    selection.index = 0;
+  }
+
+  return selection;
 }
 
 // ============================================================================
@@ -218,10 +293,47 @@ int main(int argc, char** argv) {
   // ============================================================================
 
   int ndev = tcpx_get_device_count();
-  if (ndev <= 0 || gpu_id >= ndev) {
-    std::cerr << "[ERROR] Invalid GPU" << std::endl;
+  if (ndev <= 0) {
+    std::cerr << "[ERROR] No TCPX net devices available" << std::endl;
     return 1;
   }
+
+  int cuda_device_count = 0;
+  cudaError_t cuda_err = cudaGetDeviceCount(&cuda_device_count);
+  if (cuda_err != cudaSuccess) {
+    std::cerr << "[ERROR] Unable to query CUDA device count: "
+              << cudaGetErrorString(cuda_err) << std::endl;
+    return 1;
+  }
+
+  if (gpu_id < 0 || gpu_id >= cuda_device_count) {
+    std::cerr << "[ERROR] Invalid GPU id " << gpu_id
+              << " (available GPUs: " << cuda_device_count << ")" << std::endl;
+    return 1;
+  }
+
+  NetDeviceSelection net_sel = resolve_net_device(ndev);
+  if (net_sel.index < 0 || net_sel.index >= ndev) {
+    net_sel.index = 0;
+  }
+
+  const int net_dev = net_sel.index;
+
+  if (!net_sel.devices.empty()) {
+    std::cout << "[PERF] TCPX net devices:";
+    bool first = true;
+    for (const auto& dev : net_sel.devices) {
+      if (!first) std::cout << ",";
+      std::cout << " #" << dev.first;
+      if (!dev.second.empty()) std::cout << "=" << dev.second;
+      first = false;
+    }
+    std::cout << std::endl;
+  }
+
+  std::cout << "[PERF] Selected net device: " << net_dev;
+  if (!net_sel.name.empty()) std::cout << " (" << net_sel.name << ")";
+  std::cout << std::endl;
 
   // ============================================================================
   // SERVER 端逻辑
@@ -236,7 +348,7 @@ int main(int argc, char** argv) {
     void* listen_comm = nullptr;
 
     // 调用 TCPX 插件的 listen 接口，生成 handle（包含 IP、端口等信息）
-    if (tcpx_listen(gpu_id, &handle, &listen_comm) != 0) {
+    if (tcpx_listen(net_dev, &handle, &listen_comm) != 0) {
       std::cerr << "[ERROR] tcpx_listen failed" << std::endl;
       return 1;
     }
@@ -918,7 +1030,7 @@ int main(int argc, char** argv) {
     alignas(16) unsigned char send_dev_handle_storage[512] = {0};
     void* send_dev_handle = send_dev_handle_storage;
 
-    if (tcpx_connect_v5(gpu_id, &handle, &send_comm, &send_dev_handle) != 0 || !send_comm) {
+    if (tcpx_connect_v5(net_dev, &handle, &send_comm, &send_dev_handle) != 0 || !send_comm) {
       std::cerr << "[ERROR] tcpx_connect_v5 failed" << std::endl;
       close(bootstrap_fd);
       return 1;
@@ -1135,4 +1247,3 @@ int main(int argc, char** argv) {
 
   return 0;
 }  // end of main
-

@@ -10,11 +10,13 @@
 #include <filesystem>
 #include <iostream>
 #include <cstring>
+#include <cstdio>
 #include <sstream>
 #include <thread>
 #include <vector>
 #include <chrono>
 #include <cuda.h>
+#include <cuda_runtime_api.h>
 
 namespace {
 
@@ -26,12 +28,54 @@ std::string trim(const std::string& s) {
 }
 
 bool read_gpu_pci_bdf(int gpu_id, std::string& bdf_out) {
+  // Try CUDA runtime first. Force a lightweight runtime init so GPU 0 works even
+  // before the caller sets a CUDA context.
+  cudaError_t rt_err = cudaSetDevice(gpu_id);
+  if (rt_err != cudaSuccess && rt_err != cudaErrorSetOnActiveProcess) {
+    // clear the sticky error to avoid impacting later CUDA calls
+    (void)cudaGetLastError();
+  }
+
+  char bus_id[64] = {0};
+  if (cudaDeviceGetPCIBusId(bus_id, sizeof(bus_id), gpu_id) == cudaSuccess) {
+    bdf_out = trim(bus_id);
+    if (bdf_out.size() >= 12) bdf_out = bdf_out.substr(bdf_out.size() - 12);
+    if (!bdf_out.empty()) return true;
+  }
+
+  cudaDeviceProp prop{};
+  if (cudaGetDeviceProperties(&prop, gpu_id) == cudaSuccess) {
+    char prop_bus_id[32] = {0};
+    std::snprintf(prop_bus_id, sizeof(prop_bus_id), "%04x:%02x:%02x.%d", prop.pciDomainID,
+                  prop.pciBusID, prop.pciDeviceID, 0);
+    bdf_out = trim(prop_bus_id);
+    if (bdf_out.size() >= 12) bdf_out = bdf_out.substr(bdf_out.size() - 12);
+    if (!bdf_out.empty()) return true;
+  }
+
   if (cuInit(0) != CUDA_SUCCESS) return false;
   CUdevice dev;
   if (cuDeviceGet(&dev, gpu_id) != CUDA_SUCCESS) return false;
-  char bus_id[64] = {0};
-  if (cuDeviceGetPCIBusId(bus_id, sizeof(bus_id), dev) != CUDA_SUCCESS) return false;
-  bdf_out = trim(bus_id);
+
+  char driver_bus_id[64] = {0};
+  if (cuDeviceGetPCIBusId(driver_bus_id, sizeof(driver_bus_id), dev) == CUDA_SUCCESS) {
+    bdf_out = trim(driver_bus_id);
+    if (bdf_out.size() >= 12) bdf_out = bdf_out.substr(bdf_out.size() - 12);
+    if (!bdf_out.empty()) return true;
+  }
+
+  int domain = 0, bus = 0;
+  bool have_attrs = true;
+  have_attrs &=
+      cuDeviceGetAttribute(&domain, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, dev) == CUDA_SUCCESS;
+  have_attrs &=
+      cuDeviceGetAttribute(&bus, CU_DEVICE_ATTRIBUTE_PCI_BUS_ID, dev) == CUDA_SUCCESS;
+  if (!have_attrs) return false;
+
+  // In absence of the exact device/function numbers, fall back to bus-level matching.
+  char attr_bus_id[32] = {0};
+  std::snprintf(attr_bus_id, sizeof(attr_bus_id), "%04x:%02x:00.0", domain, bus);
+  bdf_out = trim(attr_bus_id);
   if (bdf_out.size() >= 12) bdf_out = bdf_out.substr(bdf_out.size() - 12);
   return !bdf_out.empty();
 }
@@ -146,34 +190,15 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
     return a.score > b.score;
   });
 
-  // NCCL-style selection: prefer same PCIe tree, but accept any GPUDirect-capable NIC
+  // NCCL-style selection: prefer NICs sharing PCIe root with the GPU
   std::vector<Candidate> selected;
   selected.reserve(num_channels_);
 
-  // Phase 1: Select NICs with positive score (same PCIe tree)
+  // Only select NICs that share the PCIe hierarchy with the GPU when known.
   for (const auto& cand : sorted) {
     if (!cand.cuda_supported) continue;
-    if (cand.score > 0) {
-      selected.push_back(cand);
-      if ((int)selected.size() == num_channels_) break;
-    }
-  }
-
-  // Phase 2: If not enough, add any GPUDirect-capable NICs (even with negative score)
-  if ((int)selected.size() < num_channels_) {
-    for (const auto& cand : sorted) {
-      if (!cand.cuda_supported) continue;
-      // Skip if already selected
-      bool already_selected = false;
-      for (const auto& sel : selected) {
-        if (sel.dev == cand.dev) {
-          already_selected = true;
-          break;
-        }
-      }
-      if (already_selected) continue;
-
-      // Add this NIC even if score <= 0 (different PCIe tree but still GPUDirect-capable)
+    if (!gpu_pci_segments.empty() && cand.score <= 0) continue;
+    if (cand.score > 0 || gpu_pci_segments.empty()) {
       selected.push_back(cand);
       if ((int)selected.size() == num_channels_) break;
     }
@@ -187,8 +212,8 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
 
   if ((int)selected.size() < num_channels_) {
     std::cerr << "[ChannelManager] Warning: Requested " << num_channels_
-              << " channels but only " << selected.size()
-              << " GPU-direct NICs available. Reducing channel count." << std::endl;
+              << " channel(s) but only " << selected.size()
+              << " NIC(s) match GPU " << gpu_id_ << " topology. Reducing channel count." << std::endl;
     num_channels_ = selected.size();
   }
 
