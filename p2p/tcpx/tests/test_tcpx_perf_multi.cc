@@ -521,17 +521,64 @@ int main(int argc, char** argv) {
       return true;
     };
 
+    auto wait_for_channel_capacity = [&](int channel_id, ChannelResources& ch,
+                                         ChannelWindow& win) -> bool {
+      while (win.pending_reqs.size() + win.inflight_recvs.size() >=
+             MAX_INFLIGHT_PER_CHANNEL) {
+        if (!win.pending_reqs.empty()) {
+          int oldest_idx = win.pending_indices.front();
+          void* oldest_req = win.pending_reqs.front();
+          cudaEvent_t oldest_event =
+              win.events[oldest_idx % MAX_INFLIGHT_PER_CHANNEL];
+
+          std::cout << "[DEBUG][SERVER] Channel " << channel_id
+                    << " sliding window FULL (" << win.pending_reqs.size()
+                    << "+" << win.inflight_recvs.size() << "/"
+                    << MAX_INFLIGHT_PER_CHANNEL
+                    << "), waiting for chunk " << oldest_idx
+                    << " kernel to complete..." << std::endl;
+
+          if (!cuda_check(cudaEventSynchronize(oldest_event),
+                          "cudaEventSynchronize")) {
+            return false;
+          }
+
+          tcpx_irecv_consumed(ch.recv_comm, 1, oldest_req);
+          win.pending_reqs.erase(win.pending_reqs.begin());
+          win.pending_indices.erase(win.pending_indices.begin());
+
+          std::cout << "[DEBUG][SERVER] Channel " << channel_id
+                    << " window now has " << win.pending_reqs.size() << "+"
+                    << win.inflight_recvs.size() << " outstanding" << std::endl;
+          continue;
+        }
+
+        if (!win.inflight_recvs.empty()) {
+          if (!process_completed_chunk(channel_id, ch, win, /*blocking=*/true)) {
+            return false;
+          }
+          continue;
+        }
+
+        break;
+      }
+      return true;
+    };
+
     // ==========================================================================
     // 步骤 10: 性能测试主循环
     // ==========================================================================
 
     double total_time_ms = 0.0;
+    int completed_iters = 0;
+    bool abort_benchmark = false;
 
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "[PERF] Iteration " << iter << ": total bytes=" << test_size
                 << ", chunk_bytes=" << chunk_bytes << std::endl;
 
       auto start = std::chrono::high_resolution_clock::now();
+      bool iteration_failed = false;
 
       // 每次迭代开始时重置所有 channel 的滑动窗口状态
       if (impl == "kernel") {
@@ -563,61 +610,27 @@ int main(int argc, char** argv) {
         // 【关键】每个 chunk 使用唯一的 tag
         const int tag = kTransferTag + iter * 10000 + global_chunk_idx;
 
-        std::cout << "[DEBUG][SERVER] chunk=" << global_chunk_idx << " channel=" << channel_id
-                  << " tag=" << tag << " size=" << this_chunk << " offset=" << offset
-                  << " pending_kernels=" << win.pending_reqs.size() << "/" << MAX_INFLIGHT_PER_CHANNEL
-                  << " inflight_recvs=" << win.inflight_recvs.size() << std::endl;
-
-        // 确保 inflight recv 数量不会超过 TCPX 限制
-        bool drain_ok = true;
-        while (win.inflight_recvs.size() >= MAX_INFLIGHT_PER_CHANNEL) {
-          if (!process_completed_chunk(channel_id, ch, win, /*blocking=*/true)) {
-            std::cerr << "[ERROR] Failed while waiting for inflight recv to drain" << std::endl;
-            drain_ok = false;
-            break;
-          }
-        }
-        if (!drain_ok || win.inflight_recvs.size() >= MAX_INFLIGHT_PER_CHANNEL) {
-          break;
-        }
-
-        // ======================================================================
-        // 【关键修复】滑动窗口检查 - 必须在 tcpx_irecv 之前！
-        // 如果窗口满，等待最老的 chunk 的 kernel 完成，然后释放 TCPX 请求槽
-        // 注意：recv 和 unpack 已经在主循环中完成，这里只需要等待 kernel 完成
-        // ======================================================================
+        std::cout << "[DEBUG][SERVER] chunk=" << global_chunk_idx << " channel="
+                  << channel_id << " tag=" << tag << " size=" << this_chunk
+                  << " offset=" << offset << " outstanding="
+                  << (win.pending_reqs.size() + win.inflight_recvs.size()) << "/"
+                  << MAX_INFLIGHT_PER_CHANNEL << std::endl;
 
         if (impl == "kernel") {
-          if (win.pending_reqs.size() >= MAX_INFLIGHT_PER_CHANNEL) {
-            std::cout << "[DEBUG][SERVER] Channel " << channel_id << " sliding window FULL ("
-                      << win.pending_reqs.size() << "/" << MAX_INFLIGHT_PER_CHANNEL
-                      << "), waiting for oldest chunk's kernel" << std::endl;
-
-            // 获取该 channel 最老的 chunk
-            int oldest_idx = win.pending_indices.front();
-            void* oldest_req = win.pending_reqs.front();
-            cudaEvent_t oldest_event = win.events[oldest_idx % MAX_INFLIGHT_PER_CHANNEL];
-
-            std::cout << "[DEBUG][SERVER] Waiting for chunk " << oldest_idx
-                      << " kernel to complete..." << std::endl;
-
-            // 【关键】等待最老的 chunk 的 kernel 完成
-            if (!cuda_check(cudaEventSynchronize(oldest_event), "cudaEventSynchronize")) {
+          if (!wait_for_channel_capacity(channel_id, ch, win)) {
+            std::cerr << "[ERROR] Failed while waiting for channel capacity" << std::endl;
+            iteration_failed = true;
+            break;
+          }
+        } else {
+          while (win.inflight_recvs.size() >= MAX_INFLIGHT_PER_CHANNEL) {
+            if (!process_completed_chunk(channel_id, ch, win, /*blocking=*/true)) {
+              std::cerr << "[ERROR] Failed while waiting for inflight recv to drain" << std::endl;
+              iteration_failed = true;
               break;
             }
-
-            std::cout << "[DEBUG][SERVER] Chunk " << oldest_idx << " kernel completed, calling irecv_consumed" << std::endl;
-
-            // 【关键】释放最老的 chunk 的 TCPX 请求槽
-            tcpx_irecv_consumed(ch.recv_comm, 1, oldest_req);
-
-            // 从滑动窗口中移除
-            win.pending_reqs.erase(win.pending_reqs.begin());
-            win.pending_indices.erase(win.pending_indices.begin());
-
-            std::cout << "[DEBUG][SERVER] Channel " << channel_id << " window now has "
-                      << win.pending_reqs.size() << " pending chunks" << std::endl;
           }
+          if (iteration_failed) break;
         }
 
         // ======================================================================
@@ -637,6 +650,7 @@ int main(int argc, char** argv) {
         if (irecv_rc != 0) {
           std::cerr << "[ERROR] tcpx_irecv failed: rc=" << irecv_rc
                     << " chunk=" << global_chunk_idx << " channel=" << channel_id << std::endl;
+          iteration_failed = true;
           break;
         }
 
@@ -652,6 +666,7 @@ int main(int argc, char** argv) {
         bool ok = process_completed_chunk(channel_id, ch, win, /*blocking=*/false);
         if (!ok) {
           std::cerr << "[ERROR] Failed to process completed chunks" << std::endl;
+          iteration_failed = true;
           break;
         }
 
@@ -669,11 +684,18 @@ int main(int argc, char** argv) {
           }
         }
 
-        if (!ok) break;
+        if (!ok) {
+          iteration_failed = true;
+          break;
+        }
 
         offset += this_chunk;
         global_chunk_idx++;
       }  // end of chunk loop
+
+      if (iteration_failed) {
+        abort_benchmark = true;
+      }
 
       // ========================================================================
       // 迭代结束：排空所有 channels 的滑动窗口（仅 kernel 模式）
@@ -686,28 +708,35 @@ int main(int argc, char** argv) {
           while (!win.inflight_recvs.empty()) {
             if (!process_completed_chunk(ch, channel, win, /*blocking=*/true)) {
               std::cerr << "[ERROR] Failed to drain inflight recvs for channel " << ch << std::endl;
+              abort_benchmark = true;
               break;
             }
           }
+          if (abort_benchmark) break;
         }
 
-        for (int ch = 0; ch < num_channels; ++ch) {
-          ChannelResources& channel = mgr.get_channel(ch);
-          ChannelWindow& win = channel_windows[ch];
+        if (!abort_benchmark) {
+          for (int ch = 0; ch < num_channels; ++ch) {
+            ChannelResources& channel = mgr.get_channel(ch);
+            ChannelWindow& win = channel_windows[ch];
 
-          while (!win.pending_reqs.empty()) {
-            int oldest_idx = win.pending_indices.front();
-            cudaEvent_t oldest_event = win.events[oldest_idx % MAX_INFLIGHT_PER_CHANNEL];
+            while (!win.pending_reqs.empty()) {
+              int oldest_idx = win.pending_indices.front();
+              cudaEvent_t oldest_event = win.events[oldest_idx % MAX_INFLIGHT_PER_CHANNEL];
 
-            if (!cuda_check(cudaEventSynchronize(oldest_event), "cudaEventSynchronize drain")) {
-              break;
+              if (!cuda_check(cudaEventSynchronize(oldest_event), "cudaEventSynchronize drain")) {
+                abort_benchmark = true;
+                break;
+              }
+
+              void* oldest_req = win.pending_reqs.front();
+              tcpx_irecv_consumed(channel.recv_comm, 1, oldest_req);
+
+              win.pending_reqs.erase(win.pending_reqs.begin());
+              win.pending_indices.erase(win.pending_indices.begin());
             }
 
-            void* oldest_req = win.pending_reqs.front();
-            tcpx_irecv_consumed(channel.recv_comm, 1, oldest_req);
-
-            win.pending_reqs.erase(win.pending_reqs.begin());
-            win.pending_indices.erase(win.pending_indices.begin());
+            if (abort_benchmark) break;
           }
         }
       }
@@ -718,19 +747,34 @@ int main(int argc, char** argv) {
 
       auto end = std::chrono::high_resolution_clock::now();
       double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-      total_time_ms += iter_time_ms;
-      std::cout << "[PERF] Iter " << iter << " time=" << iter_time_ms << "ms" << std::endl;
+      if (!iteration_failed && !abort_benchmark) {
+        total_time_ms += iter_time_ms;
+        ++completed_iters;
+        std::cout << "[PERF] Iter " << iter << " time=" << iter_time_ms << "ms" << std::endl;
+      } else {
+        std::cerr << "[ERROR] Iter " << iter << " aborted after " << iter_time_ms << "ms" << std::endl;
+      }
+
+      if (abort_benchmark) {
+        std::cerr << "[ERROR] Aborting benchmark due to previous errors" << std::endl;
+        break;
+      }
     }  // end of iteration loop
 
     // ==========================================================================
     // 计算并输出平均性能
     // ==========================================================================
 
-    double avg_ms = total_time_ms / iterations;
-    double bw_gbps = (test_size / (1024.0 * 1024.0 * 1024.0)) / (avg_ms / 1000.0);
+    if (completed_iters > 0) {
+      double avg_ms = total_time_ms / completed_iters;
+      double bw_gbps = (test_size / (1024.0 * 1024.0 * 1024.0)) / (avg_ms / 1000.0);
 
-    std::cout << "[PERF] Avg: " << std::fixed << std::setprecision(3) << avg_ms << " ms, "
-              << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
+      std::cout << "[PERF] Avg (" << completed_iters << " iter): "
+                << std::fixed << std::setprecision(3) << avg_ms << " ms, "
+                << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
+    } else {
+      std::cerr << "[ERROR] No successful iterations recorded" << std::endl;
+    }
 
     // ==========================================================================
     // 清理资源
