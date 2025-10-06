@@ -1,18 +1,20 @@
 # Code Quality Fixes Applied
 
-**Date**: 2025-10-05  
+**Date**: 2025-10-05
 **Status**: ✅ All fixes applied and tested
 
 ---
 
 ## Summary
 
-Applied 5 critical code quality fixes identified in code review:
+Applied 7 critical code quality fixes identified in code review:
 1. ✅ ODR violation - multiple struct definitions
 2. ✅ Hardcoded net_dev mapping without validation
 3. ✅ Double-destroy of CUDA events
 4. ✅ nullptr passed to tcpx_test
 5. ✅ Missing errno header
+6. ✅ Empty vector dereference in `ChannelManager::get_channel`
+7. ✅ Added `tcpx_get_properties` API for device property queries
 
 All fixes have been implemented, compiled, and tested successfully.
 
@@ -316,15 +318,83 @@ $ ./tests/test_modules
 
 ---
 
+## Fix 6: Empty Vector Dereference Protection
+
+### Problem
+
+`ChannelManager::get_channel()` returned `channels_[0]` as fallback when index was invalid, but didn't check if `channels_` was empty. On local runs without TCPX, `num_channels_` collapses to 0, causing undefined behavior.
+
+### Solution
+
+Added explicit empty vector check with fail-fast behavior:
+
+```cpp
+ChannelResources& ChannelManager::get_channel(int idx) {
+  // CRITICAL: Check for empty vector first
+  if (channels_.empty()) {
+    std::cerr << "[ChannelManager] FATAL: No channels available (TCPX not initialized)" << std::endl;
+    std::abort();  // Fail fast to make misuse obvious
+  }
+
+  if (idx < 0 || idx >= num_channels_) {
+    std::cerr << "[ChannelManager] ERROR: Invalid channel index " << idx << std::endl;
+    return channels_[0];  // Safe fallback since we know channels_ is not empty
+  }
+
+  return channels_[idx];
+}
+```
+
+**Impact**: Prevents undefined behavior on machines without TCPX, provides clear error messages.
+
+---
+
+## Fix 7: Added `tcpx_get_properties` API
+
+### Problem
+
+`ChannelManager` used simple `ch.net_dev = i` mapping without verifying actual device properties or logging NIC names, making multi-NIC debugging difficult.
+
+### Solution
+
+Added new API to query device properties:
+
+```cpp
+// include/tcpx_interface.h
+struct tcpx_net_properties {
+  char* name;       // Network interface name (e.g., "eth1")
+  char* pci_path;   // PCI path
+  int ptr_support;  // Supported pointer types
+  int speed;        // Link speed in Mbps
+  // ... other fields
+};
+
+int tcpx_get_properties(int dev, struct tcpx_net_properties* props);
+```
+
+**Usage in ChannelManager**:
+```cpp
+tcpx_net_properties props{};
+if (tcpx_get_properties(dev, &props) == 0) {
+  const char* nic_name = props.name ? props.name : "unknown";
+  std::cout << "[ChannelManager] Channel " << i << " → netDev " << dev
+            << " (" << nic_name << ")" << std::endl;
+}
+```
+
+**Impact**: Better logging and debugging for multi-NIC configurations.
+
+---
+
 ## Next Steps
 
 With infrastructure now solid and code quality issues resolved:
 
 1. ✅ **Phase 1 Complete** - All modules implemented and tested
-2. ✅ **Code Quality Fixes** - All issues resolved
-3. ⏭️ **Phase 2** - Refactor `test_tcpx_transfer.cc` to use new modules
-4. 🔜 **Phase 3** - Refactor `test_tcpx_perf.cc` for multi-channel
-5. 🔜 **Phase 4** - Performance validation on real hardware
+2. ✅ **Code Quality Fixes** - All 7 issues resolved
+3. ✅ **Phase 2 Complete** - `test_tcpx_transfer_multi.cc` created
+4. ✅ **Phase 3 Complete** - `test_tcpx_perf_multi.cc` created
+5. ⚠️ **Current Issue** - GPU-NIC topology fix needs revert (see TOPOLOGY_FIX.md)
 
 ---
 
@@ -336,10 +406,8 @@ All identified code quality issues have been successfully resolved:
 - ✅ Robust error handling
 - ✅ Portable code
 - ✅ Comprehensive testing
+- ✅ Empty vector protection
+- ✅ Device property queries
 
-The codebase is now ready for Phase 2: refactoring existing tests to use the new multi-channel infrastructure.
-
----
-
-**Ready to proceed with test refactoring!** 🚀
+**Current Status**: Multi-channel infrastructure complete, but needs topology fix revert (see CURRENT_STATUS.md).
 

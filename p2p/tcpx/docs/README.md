@@ -4,6 +4,16 @@ This directory contains detailed technical documentation for the TCPX P2P projec
 
 ---
 
+## 🚨 START HERE
+
+### Current Status (2025-10-06)
+
+⚠️ **IMPORTANT**: The code currently has a bug that needs to be reverted. See:
+1. **[CURRENT_STATUS.md](CURRENT_STATUS.md)** - Current state and immediate action required
+2. **[TOPOLOGY_FIX.md](TOPOLOGY_FIX.md)** - Analysis of the bug and lessons learned
+
+---
+
 ## 📚 Essential Documents (Read These First)
 
 ### For Getting Started
@@ -21,22 +31,31 @@ This directory contains detailed technical documentation for the TCPX P2P projec
 
 ## 📖 Reference Documents
 
+### Current Status and Issues
+
+- **[CURRENT_STATUS.md](CURRENT_STATUS.md)** - ⚠️ Current state, bugs, and action items
+- **[TOPOLOGY_FIX.md](TOPOLOGY_FIX.md)** - ⚠️ GPU-NIC topology analysis and lessons learned
+
 ### Bug Fixes and Optimizations
 
 - **[SLIDING_WINDOW_FIX_FINAL.md](SLIDING_WINDOW_FIX_FINAL.md)** - Critical sliding window bug fix
 - **[SERVER_17_CHUNKS_BUG.md](SERVER_17_CHUNKS_BUG.md)** - Analysis of 17-chunk bug
-- **[CHUNK_SIZE_OPTIMIZATION.md](CHUNK_SIZE_OPTIMIZATION.md)** - Chunk size optimization (512KB → 2MB)
-- **[DEBUG_LOGS_REMOVED.md](DEBUG_LOGS_REMOVED.md)** - Debug log removal for performance
+- **[FIXES_APPLIED.md](FIXES_APPLIED.md)** - All 7 code quality fixes
+- **[CRITICAL_FIXES.md](CRITICAL_FIXES.md)** - ⚠️ Multi-channel fixes (one reverted)
 
 ### Technical Reference
 
 - **[TCPX_LOGIC_MAPPING.md](TCPX_LOGIC_MAPPING.md)** - TCPX API mapping and logic
 - **[COMMON_MISTAKES_AND_FIXES.md](COMMON_MISTAKES_AND_FIXES.md)** - Common mistakes and how to fix them
 
+### Project Milestones
+
+- **[PHASE1_COMPLETE.md](PHASE1_COMPLETE.md)** - Infrastructure modules (SlidingWindow, Bootstrap, ChannelManager)
+- **[PHASE3_COMPLETE.md](PHASE3_COMPLETE.md)** - Multi-channel performance test
+
 ### Historical
 
 - **[PERF_DIARY.md](PERF_DIARY.md)** - Performance optimization history
-- **[PERFORMANCE_ANALYSIS_AND_NEXT_STEPS.md](PERFORMANCE_ANALYSIS_AND_NEXT_STEPS.md)** - Performance analysis
 
 ### Setup
 
@@ -47,6 +66,10 @@ This directory contains detailed technical documentation for the TCPX P2P projec
 ## 🗂️ Document Organization
 
 ### By Purpose
+
+**Current Status** (⚠️ READ FIRST):
+- CURRENT_STATUS.md - Current state and action items
+- TOPOLOGY_FIX.md - GPU-NIC topology lessons learned
 
 **Getting Started**:
 - QUICKSTART.md (in parent directory)
@@ -64,24 +87,28 @@ This directory contains detailed technical documentation for the TCPX P2P projec
 **Bug Fixes**:
 - SLIDING_WINDOW_FIX_FINAL.md (critical fix)
 - SERVER_17_CHUNKS_BUG.md (bug analysis)
+- FIXES_APPLIED.md (7 code quality fixes)
+- CRITICAL_FIXES.md (multi-channel fixes, one reverted)
 
-**Optimizations**:
-- CHUNK_SIZE_OPTIMIZATION.md
-- DEBUG_LOGS_REMOVED.md
-- PERF_DIARY.md
+**Project Milestones**:
+- PHASE1_COMPLETE.md (infrastructure modules)
+- PHASE3_COMPLETE.md (multi-channel test)
+
+**Historical**:
+- PERF_DIARY.md (optimization history)
 
 **Setup**:
-- CURRENT_SETUP.md
+- CURRENT_SETUP.md (environment configuration)
 
 ---
 
 ## 🎯 Reading Path for New Developers
 
-### Day 1: Get Running
+### Day 1: Understand Current State
 
-1. Read [../QUICKSTART.md](../QUICKSTART.md)
-2. Build and run the test
-3. If issues, check [../TROUBLESHOOTING.md](../TROUBLESHOOTING.md)
+1. ⚠️ Read [CURRENT_STATUS.md](CURRENT_STATUS.md) - **START HERE**
+2. ⚠️ Read [TOPOLOGY_FIX.md](TOPOLOGY_FIX.md) - Understand the current bug
+3. Read [../QUICKSTART.md](../QUICKSTART.md) - Build and run
 
 ### Day 2: Understand the System
 
@@ -93,35 +120,13 @@ This directory contains detailed technical documentation for the TCPX P2P projec
 
 1. Read [SLIDING_WINDOW_FIX_FINAL.md](SLIDING_WINDOW_FIX_FINAL.md) - Critical bug fix
 2. Read [TCPX_LOGIC_MAPPING.md](TCPX_LOGIC_MAPPING.md) - TCPX API details
-3. Read [CHUNK_SIZE_OPTIMIZATION.md](CHUNK_SIZE_OPTIMIZATION.md) - Optimization details
+3. Read [FIXES_APPLIED.md](FIXES_APPLIED.md) - Code quality improvements
 
 ### Day 4+: Start Contributing
 
 1. Read [COMMON_MISTAKES_AND_FIXES.md](COMMON_MISTAKES_AND_FIXES.md) - Avoid pitfalls
 2. Read [PERF_DIARY.md](PERF_DIARY.md) - Learn from history
-3. Start debugging multi-NIC issue (see [../HANDOFF.md](../HANDOFF.md))
-
----
-
-## 📝 Document Maintenance
-
-### When to Update
-
-- **HANDOFF.md**: When project status changes
-- **TROUBLESHOOTING.md**: When new issues are discovered
-- **TEST_TCPX_PERF_EXPLAINED.md**: When code changes significantly
-- **PERF_DIARY.md**: When new optimizations are made
-
-### When to Create New Documents
-
-- **Bug fixes**: Create a new document explaining the bug and fix
-- **Optimizations**: Create a new document explaining the optimization
-- **New features**: Update TEST_TCPX_PERF_EXPLAINED.md or create new doc
-
-### When to Archive Documents
-
-- When information is outdated or superseded
-- Move to `docs/archive/` directory (create if needed)
+3. Fix the current bug (see CURRENT_STATUS.md)
 
 ---
 
@@ -129,47 +134,78 @@ This directory contains detailed technical documentation for the TCPX P2P projec
 
 ### Find Information About...
 
+**Current Issues** (⚠️ START HERE):
+- CURRENT_STATUS.md - Current bugs and action items
+- TOPOLOGY_FIX.md - GPU-NIC topology constraints
+
 **Sliding window**:
-- SLIDING_WINDOW_VISUAL.md
-- SLIDING_WINDOW_FIX_FINAL.md
+- SLIDING_WINDOW_VISUAL.md - Visual explanation
+- SLIDING_WINDOW_FIX_FINAL.md - Critical bug fix
 - TEST_TCPX_PERF_EXPLAINED.md (lines 300-400)
 
-**Chunking**:
-- CHUNK_SIZE_OPTIMIZATION.md
-- TEST_TCPX_PERF_EXPLAINED.md (lines 200-250)
+**Multi-channel architecture**:
+- PHASE1_COMPLETE.md - Infrastructure modules
+- PHASE3_COMPLETE.md - Performance test
+- CURRENT_STATUS.md - Current state
 
 **Unpack kernel**:
 - TEST_TCPX_PERF_EXPLAINED.md (lines 600-700)
 - PERF_DIARY.md (kernel performance fix)
 
 **TCPX API**:
-- TCPX_LOGIC_MAPPING.md
+- TCPX_LOGIC_MAPPING.md - API reference
 - TEST_TCPX_PERF_EXPLAINED.md (throughout)
 
+**Bug fixes**:
+- FIXES_APPLIED.md - 7 code quality fixes
+- CRITICAL_FIXES.md - Multi-channel fixes (one reverted)
+- SLIDING_WINDOW_FIX_FINAL.md - Sliding window fix
+- SERVER_17_CHUNKS_BUG.md - 17-chunk bug analysis
+
 **Performance**:
-- PERF_DIARY.md
-- PERFORMANCE_ANALYSIS_AND_NEXT_STEPS.md
-- CHUNK_SIZE_OPTIMIZATION.md
-- DEBUG_LOGS_REMOVED.md
+- PERF_DIARY.md - Optimization history
 
 **Setup**:
-- CURRENT_SETUP.md
-- ../QUICKSTART.md
+- CURRENT_SETUP.md - Environment configuration
+- ../QUICKSTART.md - Quick start guide
 
 **Troubleshooting**:
-- ../TROUBLESHOOTING.md
-- COMMON_MISTAKES_AND_FIXES.md
+- ../TROUBLESHOOTING.md - Common issues
+- COMMON_MISTAKES_AND_FIXES.md - Common mistakes
 
 ---
 
 ## 📞 Need Help?
 
-1. **Quick question**: Check [../TROUBLESHOOTING.md](../TROUBLESHOOTING.md)
-2. **Understanding code**: Read [TEST_TCPX_PERF_EXPLAINED.md](TEST_TCPX_PERF_EXPLAINED.md)
-3. **Project overview**: Read [../HANDOFF.md](../HANDOFF.md)
-4. **Specific bug/optimization**: Check relevant document above
+1. **Current bug**: Read [CURRENT_STATUS.md](CURRENT_STATUS.md) and [TOPOLOGY_FIX.md](TOPOLOGY_FIX.md)
+2. **Quick question**: Check [../TROUBLESHOOTING.md](../TROUBLESHOOTING.md)
+3. **Understanding code**: Read [TEST_TCPX_PERF_EXPLAINED.md](TEST_TCPX_PERF_EXPLAINED.md)
+4. **Project overview**: Read [../HANDOFF.md](../HANDOFF.md)
 
 ---
 
-**Last Updated**: 2025-10-02
+## 📝 Document Maintenance
+
+### Recent Changes (2025-10-06)
+
+**Added**:
+- CURRENT_STATUS.md - Current state and action items
+- TOPOLOGY_FIX.md - GPU-NIC topology analysis
+
+**Updated**:
+- FIXES_APPLIED.md - Added fixes #6 and #7
+- CRITICAL_FIXES.md - Marked fix #2 as reverted
+- README.md (this file) - Reorganized for current state
+
+**Removed** (outdated/merged):
+- DEBUG_LOGS_ADDED.md, DEBUG_LOGS_REMOVED.md
+- CHUNK_SIZE_OPTIMIZATION.md (incorrect optimization)
+- MULTI_CHANNEL_DESIGN.md, MULTI_CHANNEL_IMPLEMENTATION_DETAILS.md
+- TRANSFER_TEST_REFACTOR.md, tcpx_transfer.md
+- PERFORMANCE_ANALYSIS_AND_NEXT_STEPS.md
+- ADDITIONAL_FIXES.md (merged into FIXES_APPLIED.md)
+
+---
+
+**Last Updated**: 2025-10-06
 

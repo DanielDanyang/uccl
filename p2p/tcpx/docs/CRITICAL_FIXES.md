@@ -1,17 +1,30 @@
 # Critical Fixes for Multi-Channel Implementation
 
-**Date**: 2025-10-05  
-**Status**: ✅ **COMPLETE**
+**Date**: 2025-10-05
+**Status**: ⚠️ **PARTIALLY REVERTED** (Fix #2 was incorrect, see TOPOLOGY_FIX.md)
+
+---
+
+## ⚠️ IMPORTANT UPDATE (2025-10-06)
+
+**Fix #2 (get_channel fail-fast) was INCORRECT and has been REVERTED.**
+
+The change that made `get_channel` call `std::abort()` on invalid index was based on a misunderstanding of the hardware topology. See **TOPOLOGY_FIX.md** for full analysis.
+
+**Current Status**:
+- ✅ Fix #1 (channel count update) - Still valid and working
+- ❌ Fix #2 (get_channel fail-fast) - **REVERTED** - Original fallback to channel 0 was correct
+- ✅ Fix #3 (pipelined processing) - Still valid and working
 
 ---
 
 ## Summary
 
-Fixed three critical bugs that would have prevented multi-channel mode from working correctly:
+Fixed three critical bugs, but one fix was later found to be incorrect:
 
-1. **Channel count never updated after clamping**
-2. **get_channel hides invalid access by returning channel 0**
-3. **Server processes chunks strictly serially**
+1. ✅ **Channel count never updated after clamping** - VALID
+2. ❌ **get_channel hides invalid access** - **REVERTED** (was based on wrong assumption)
+3. ✅ **Server processes chunks strictly serially** - VALID
 
 ---
 

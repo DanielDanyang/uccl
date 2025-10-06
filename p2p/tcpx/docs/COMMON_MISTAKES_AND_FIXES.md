@@ -1,5 +1,9 @@
 # TCPX 常见错误和修复方案
 
+**Last Updated**: 2025-10-06
+
+---
+
 ## 🎯 快速诊断表
 
 | 症状 | 可能原因 | 快速检查 | 文档位置 |
@@ -8,7 +12,8 @@
 | "unable to allocate requests" | 超过 16 个并发请求 | 检查是否有滑动窗口逻辑 | [错误 2](#错误-2-unable-to-allocate-requests) |
 | 数据校验失败 | 过早调用 `irecv_consumed` | 检查是否在 kernel 完成前释放 | [错误 3](#错误-3-数据校验失败垃圾数据) |
 | 传输卡住/超时 | Tag 冲突 | 检查每个 chunk 是否有唯一 tag | [错误 4](#错误-4-传输卡住或超时) |
-| "rx no cmsg" | devmem-tcp 未启用 | `dmesg \| grep devmem` | [错误 5](#错误-5-rx-no-cmsg) |
+| "rx no cmsg" (GPU-NIC不匹配) | GPU和NIC在不同PCIe根 | 检查GPU-NIC拓扑 | [错误 5](#错误-5-rx-no-cmsg-gpu-nic拓扑不匹配) |
+| "rx no cmsg" (devmem未启用) | devmem-tcp 未启用 | `dmesg \| grep devmem` | [错误 6](#错误-6-rx-no-cmsg-devmem-tcp未启用) |
 
 ---
 
@@ -441,6 +446,100 @@ if (memcmp(expected.data(), actual.data(), test_size) != 0) {
 
 ---
 
-**最后更新**: 2025-10-02  
+## 错误 5: "rx no cmsg" (GPU-NIC拓扑不匹配)
+
+### 症状
+
+```
+[ncclNet:2] fatal, 10.136.1.163<49331><-10.136.0.97<51433> rx no cmsg
+Kernel launch failed: driver shutting down
+```
+
+### 根本原因
+
+**PCIe拓扑约束**: GPU只能使用同一PCIe根复合体上的NIC。
+
+**示例**:
+```
+pci0000:01: GPU 0, GPU 1, eth1  ← GPU 0 只能用 eth1
+pci0000:07: GPU 2, GPU 3, eth2  ← GPU 2 只能用 eth2
+pci0000:81: GPU 4, GPU 5, eth3  ← GPU 4 只能用 eth3
+pci0000:87: GPU 6, GPU 7, eth4  ← GPU 6 只能用 eth4
+```
+
+如果GPU 0尝试使用eth2（在pci0000:07上），内核驱动无法提供devmem control messages，导致`rx no cmsg`。
+
+### 诊断方法
+
+```bash
+# 1. 查看GPU的PCIe位置
+nvidia-smi topo -m
+
+# 2. 查看NIC的PCIe位置
+ls -l /sys/class/net/eth*/device
+
+# 3. 检查ChannelManager日志
+# 应该看到:
+[ChannelManager] GPU 0 PCI BDF 0000:04:00.0 (/sys/devices/pci0000:01/...)
+[ChannelManager] Channel 0 → netDev 0 (eth1, PCI=.../pci0000:01/..., score=296)
+
+# 如果score < 0，说明GPU和NIC在不同PCIe根上！
+```
+
+### 修复方案
+
+**选项1**: 使用正确的GPU-NIC配对
+```bash
+# GPU 0 → eth1 (单channel)
+UCCL_TCPX_NUM_CHANNELS=1 ./tests/test_tcpx_perf_multi server 0
+
+# 使用4个GPU来利用4个NIC
+UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0,2,4,6
+```
+
+**选项2**: 多进程方式（NCCL风格）
+```bash
+# 每个GPU一个进程，自动匹配其本地NIC
+for gpu in {0..7}; do
+  CUDA_VISIBLE_DEVICES=$gpu UCCL_TCPX_NUM_CHANNELS=1 \
+    ./tests/test_tcpx_perf_multi server 0 &
+done
+```
+
+### 详细分析
+
+参见 **TOPOLOGY_FIX.md** 和 **CURRENT_STATUS.md**。
+
+---
+
+## 错误 6: "rx no cmsg" (devmem-tcp未启用)
+
+### 症状
+
+同上，但原因不同。
+
+### 根本原因
+
+devmem-tcp内核特性未启用或配置错误。
+
+### 诊断方法
+
+```bash
+# 检查devmem-tcp是否启用
+dmesg | grep devmem
+# 应该看到: "devmem-tcp enabled"
+
+# 检查内核版本
+uname -r
+# 需要 >= 6.x 且启用了 CONFIG_PAGE_POOL_STATS
+```
+
+### 修复方案
+
+参见原有的错误5内容（devmem-tcp配置）。
+
+---
+
+**最后更新**: 2025-10-06
 **作者**: 基于实际开发经验和错误修复历史
 

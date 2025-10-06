@@ -8,13 +8,13 @@
 #include <algorithm>
 #include <deque>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <cstring>
 #include <sstream>
 #include <thread>
 #include <vector>
 #include <chrono>
+#include <cuda.h>
 
 namespace {
 
@@ -26,22 +26,14 @@ std::string trim(const std::string& s) {
 }
 
 bool read_gpu_pci_bdf(int gpu_id, std::string& bdf_out) {
-  std::ifstream file("/proc/driver/nvidia/gpus/" + std::to_string(gpu_id) + "/information");
-  if (!file.is_open()) return false;
-  std::string line;
-  while (std::getline(file, line)) {
-    auto pos = line.find("Bus Location");
-    if (pos == std::string::npos) continue;
-    auto colon = line.find(':', pos);
-    if (colon == std::string::npos) continue;
-    std::string bdf = trim(line.substr(colon + 1));
-    if (bdf.size() >= 12) bdf = bdf.substr(bdf.size() - 12);  // Keep xxxx:yy:zz.z
-    if (!bdf.empty()) {
-      bdf_out = bdf;
-      return true;
-    }
-  }
-  return false;
+  if (cuInit(0) != CUDA_SUCCESS) return false;
+  CUdevice dev;
+  if (cuDeviceGet(&dev, gpu_id) != CUDA_SUCCESS) return false;
+  char bus_id[64] = {0};
+  if (cuDeviceGetPCIBusId(bus_id, sizeof(bus_id), dev) != CUDA_SUCCESS) return false;
+  bdf_out = trim(bus_id);
+  if (bdf_out.size() >= 12) bdf_out = bdf_out.substr(bdf_out.size() - 12);
+  return !bdf_out.empty();
 }
 
 std::string canonical_path(const std::string& path) {
@@ -154,13 +146,37 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
     return a.score > b.score;
   });
 
+  // NCCL-style selection: prefer same PCIe tree, but accept any GPUDirect-capable NIC
   std::vector<Candidate> selected;
   selected.reserve(num_channels_);
+
+  // Phase 1: Select NICs with positive score (same PCIe tree)
   for (const auto& cand : sorted) {
     if (!cand.cuda_supported) continue;
-    if (!gpu_pci_segments.empty() && cand.score < 0) continue;
-    selected.push_back(cand);
-    if ((int)selected.size() == num_channels_) break;
+    if (cand.score > 0) {
+      selected.push_back(cand);
+      if ((int)selected.size() == num_channels_) break;
+    }
+  }
+
+  // Phase 2: If not enough, add any GPUDirect-capable NICs (even with negative score)
+  if ((int)selected.size() < num_channels_) {
+    for (const auto& cand : sorted) {
+      if (!cand.cuda_supported) continue;
+      // Skip if already selected
+      bool already_selected = false;
+      for (const auto& sel : selected) {
+        if (sel.dev == cand.dev) {
+          already_selected = true;
+          break;
+        }
+      }
+      if (already_selected) continue;
+
+      // Add this NIC even if score <= 0 (different PCIe tree but still GPUDirect-capable)
+      selected.push_back(cand);
+      if ((int)selected.size() == num_channels_) break;
+    }
   }
 
   if (selected.empty()) {
@@ -172,7 +188,7 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
   if ((int)selected.size() < num_channels_) {
     std::cerr << "[ChannelManager] Warning: Requested " << num_channels_
               << " channels but only " << selected.size()
-              << " GPU-direct NICs matched this GPU. Reducing channel count." << std::endl;
+              << " GPU-direct NICs available. Reducing channel count." << std::endl;
     num_channels_ = selected.size();
   }
 

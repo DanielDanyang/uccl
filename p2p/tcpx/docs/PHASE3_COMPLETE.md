@@ -1,13 +1,22 @@
 # Phase 3: Multi-Channel Performance Test - Complete
 
-**Date**: 2025-10-05  
-**Status**: ✅ **COMPLETE**
+**Date**: 2025-10-05
+**Updated**: 2025-10-06
+**Status**: ✅ **COMPLETE** (but see note below about chunk size)
+
+---
+
+## ⚠️ Important Note (2025-10-06)
+
+**Chunk size**: The default is **512KB**, not 2MB. The "2MB optimization" mentioned in earlier versions was incorrect and has been corrected.
+
+**Current issue**: GPU-NIC topology fix needs revert. See **CURRENT_STATUS.md** and **TOPOLOGY_FIX.md** for details.
 
 ---
 
 ## 🎯 Phase 3 Goal
 
-Refactor `test_tcpx_perf.cc` to use multi-channel architecture, enabling utilization of all 4 NICs (eth1-4) to achieve 4× bandwidth improvement.
+Refactor `test_tcpx_perf.cc` to use multi-channel architecture, enabling utilization of multiple NICs to achieve aggregate bandwidth improvement.
 
 ---
 
