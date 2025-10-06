@@ -5,10 +5,85 @@
 
 #include "channel_manager.h"
 #include "sliding_window.h"
+#include <algorithm>
+#include <deque>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <cstring>
+#include <sstream>
 #include <thread>
+#include <vector>
 #include <chrono>
+
+namespace {
+
+std::string trim(const std::string& s) {
+  size_t start = s.find_first_not_of(" \t\n\r");
+  if (start == std::string::npos) return "";
+  size_t end = s.find_last_not_of(" \t\n\r");
+  return s.substr(start, end - start + 1);
+}
+
+bool read_gpu_pci_bdf(int gpu_id, std::string& bdf_out) {
+  std::ifstream file("/proc/driver/nvidia/gpus/" + std::to_string(gpu_id) + "/information");
+  if (!file.is_open()) return false;
+  std::string line;
+  while (std::getline(file, line)) {
+    auto pos = line.find("Bus Location");
+    if (pos == std::string::npos) continue;
+    auto colon = line.find(':', pos);
+    if (colon == std::string::npos) continue;
+    std::string bdf = trim(line.substr(colon + 1));
+    if (bdf.size() >= 12) bdf = bdf.substr(bdf.size() - 12);  // Keep xxxx:yy:zz.z
+    if (!bdf.empty()) {
+      bdf_out = bdf;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string canonical_path(const std::string& path) {
+  if (path.empty()) return path;
+  std::error_code ec;
+  auto p = std::filesystem::path(path);
+  auto canonical = std::filesystem::canonical(p, ec);
+  if (ec) return path;
+  return canonical.string();
+}
+
+std::vector<std::string> extract_pci_segments(const std::string& path) {
+  std::vector<std::string> segments;
+  if (path.empty()) return segments;
+  std::stringstream ss(path);
+  std::string item;
+  while (std::getline(ss, item, '/')) {
+    if (item.find(':') != std::string::npos && item.size() >= 7) {
+      segments.push_back(item);
+    }
+  }
+  return segments;
+}
+
+int compute_pci_score(const std::vector<std::string>& gpu_path,
+                      const std::vector<std::string>& nic_path) {
+  if (gpu_path.empty() || nic_path.empty()) return -1000;
+  size_t min_len = std::min(gpu_path.size(), nic_path.size());
+  size_t common = 0;
+  for (size_t i = 0; i < min_len; ++i) {
+    if (gpu_path[i] == nic_path[i]) {
+      ++common;
+    } else {
+      break;
+    }
+  }
+  if (common == 0) return -1000;
+  int distance = static_cast<int>(gpu_path.size() + nic_path.size() - 2 * common);
+  return static_cast<int>(common * 100 - distance);
+}
+
+}  // namespace
 
 ChannelManager::ChannelManager(int num_channels, int gpu_id)
     : num_channels_(num_channels), gpu_id_(gpu_id) {
@@ -28,48 +103,112 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
     num_channels_ = tcpx_dev_count;
   }
 
+  std::string gpu_bdf;
+  std::vector<std::string> gpu_pci_segments;
+  if (read_gpu_pci_bdf(gpu_id_, gpu_bdf)) {
+    std::string gpu_sysfs = canonical_path("/sys/bus/pci/devices/" + gpu_bdf);
+    gpu_pci_segments = extract_pci_segments(gpu_sysfs);
+    std::cout << "[ChannelManager] GPU " << gpu_id_ << " PCI BDF " << gpu_bdf
+              << " (" << gpu_sysfs << ")" << std::endl;
+  } else {
+    std::cerr << "[ChannelManager] Warning: Unable to determine PCI path for GPU "
+              << gpu_id_ << ". Falling back to naive NIC ordering." << std::endl;
+  }
+
+  struct Candidate {
+    int dev = -1;
+    tcpx_net_properties props{};
+    std::vector<std::string> pci_segments;
+    int score = -1000;
+    bool cuda_supported = false;
+  };
+
+  std::vector<Candidate> candidates;
+  candidates.reserve(tcpx_dev_count);
+  for (int dev = 0; dev < tcpx_dev_count; ++dev) {
+    tcpx_net_properties props{};
+    if (tcpx_get_properties(dev, &props) != 0) continue;
+
+    Candidate cand;
+    cand.dev = dev;
+    cand.props = props;
+    cand.cuda_supported = (props.ptr_support & NCCL_PTR_CUDA) != 0;
+    std::string nic_path = props.pci_path ? props.pci_path : "";
+    if (!nic_path.empty()) {
+      nic_path = canonical_path(nic_path);
+      cand.pci_segments = extract_pci_segments(nic_path);
+      cand.score = compute_pci_score(gpu_pci_segments, cand.pci_segments);
+    }
+    candidates.push_back(cand);
+  }
+
+  if (candidates.empty()) {
+    std::cerr << "[ChannelManager] No TCPX devices available" << std::endl;
+    num_channels_ = 0;
+    return;
+  }
+
+  std::vector<Candidate> sorted = candidates;
+  std::sort(sorted.begin(), sorted.end(), [](const Candidate& a, const Candidate& b) {
+    if (a.score == b.score) return a.dev < b.dev;
+    return a.score > b.score;
+  });
+
+  std::vector<Candidate> selected;
+  selected.reserve(num_channels_);
+  for (const auto& cand : sorted) {
+    if (!cand.cuda_supported) continue;
+    if (!gpu_pci_segments.empty() && cand.score < 0) continue;
+    selected.push_back(cand);
+    if ((int)selected.size() == num_channels_) break;
+  }
+
+  if (selected.empty()) {
+    std::cerr << "[ChannelManager] Warning: No GPU-direct capable NICs detected for GPU "
+              << gpu_id_ << ". Falling back to first enumerated NIC." << std::endl;
+    selected.push_back(sorted.front());
+  }
+
+  if ((int)selected.size() < num_channels_) {
+    std::cerr << "[ChannelManager] Warning: Requested " << num_channels_
+              << " channels but only " << selected.size()
+              << " GPU-direct NICs matched this GPU. Reducing channel count." << std::endl;
+    num_channels_ = selected.size();
+  }
+
   channels_.resize(num_channels_);
 
-  // Initialize each channel
-  for (int i = 0; i < num_channels_; i++) {
+  for (int i = 0; i < num_channels_; ++i) {
     ChannelResources& ch = channels_[i];
+    const auto& cand = selected[i];
 
     ch.channel_id = i;
+    ch.net_dev = cand.dev;
 
-    // Map channel_id to TCPX device index
-    // TCPX enumerates devices according to NCCL_GPUDIRECTTCPX_SOCKET_IFNAME
-    // Query actual device properties to verify mapping
-    ch.net_dev = i;
-
-    // Query device properties to get actual NIC name
-    struct tcpx_net_properties props;
-    if (tcpx_get_properties(i, &props) == 0 && props.name) {
-      std::cout << "[ChannelManager] Channel " << i << " → netDev " << i
-                << " (" << props.name << ", " << props.speed << " Mbps)" << std::endl;
-    } else {
-      std::cout << "[ChannelManager] Channel " << i << " → netDev " << i
-                << " (properties unavailable)" << std::endl;
-    }
+    const char* nic_name = cand.props.name ? cand.props.name : "unknown";
+    const char* nic_pci = cand.props.pci_path ? cand.props.pci_path : "";
+    std::cout << "[ChannelManager] Channel " << i << " → netDev " << cand.dev
+              << " (" << nic_name << ", PCI=" << nic_pci
+              << ", score=" << cand.score << ")" << std::endl;
 
     ch.listen_comm = nullptr;
     ch.recv_comm = nullptr;
     ch.send_comm = nullptr;
 
-    // Initialize device handle pointers to point into storage
     ch.recv_dev_handle = ch.recv_dev_handle_storage.data();
     ch.send_dev_handle = ch.send_dev_handle_storage.data();
     std::memset(ch.recv_dev_handle_storage.data(), 0, ch.recv_dev_handle_storage.size());
     std::memset(ch.send_dev_handle_storage.data(), 0, ch.send_dev_handle_storage.size());
 
     ch.mhandle = nullptr;
-    ch.sliding_window = new SlidingWindow(16);  // Max 16 in-flight per TCPX comm
+    ch.sliding_window = new SlidingWindow(16);
     ch.bytes_transferred = 0;
     ch.chunks_processed = 0;
   }
 
   std::cout << "[ChannelManager] Created " << num_channels_
-            << " channels for GPU " << gpu_id_
-            << " (TCPX devices: " << tcpx_dev_count << ")" << std::endl;
+            << " channel(s) for GPU " << gpu_id_
+            << " (TCPX devices available: " << tcpx_dev_count << ")" << std::endl;
 }
 
 ChannelManager::~ChannelManager() {
@@ -282,4 +421,3 @@ void ChannelManager::close_all(bool is_recv) {
   
   std::cout << "[ChannelManager] All channels closed" << std::endl;
 }
-

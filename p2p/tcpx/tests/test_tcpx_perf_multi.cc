@@ -378,7 +378,12 @@ int main(int argc, char** argv) {
         auto& entry = win.inflight_recvs.front();
         int done = 0;
         int received_size = 0;
-        tcpx_test(entry.request, &done, &received_size);
+        int test_rc = tcpx_test(entry.request, &done, &received_size);
+        if (test_rc != 0) {
+          std::cerr << "[ERROR] tcpx_test failed (rc=" << test_rc << ") for channel "
+                    << channel_id << " chunk " << entry.global_idx << std::endl;
+          return false;
+        }
         if (!done) {
           if (blocking) {
             std::this_thread::sleep_for(std::chrono::microseconds(kSleepMicros));
@@ -620,10 +625,27 @@ int main(int argc, char** argv) {
         posted.global_idx = global_chunk_idx;
         win.inflight_recvs.push_back(std::move(posted));
 
-        if (!process_completed_chunk(channel_id, ch, win, /*blocking=*/false)) {
+        bool ok = process_completed_chunk(channel_id, ch, win, /*blocking=*/false);
+        if (!ok) {
           std::cerr << "[ERROR] Failed to process completed chunks" << std::endl;
           break;
         }
+
+        // Opportunistically drain other channels to keep metadata queues short
+        for (int other = 0; other < num_channels; ++other) {
+          if (other == channel_id) continue;
+          ChannelWindow& other_win = channel_windows[other];
+          if (other_win.inflight_recvs.empty()) continue;
+          ChannelResources& other_ch = mgr.get_channel(other);
+          if (!process_completed_chunk(other, other_ch, other_win, /*blocking=*/false)) {
+            std::cerr << "[ERROR] Failed to process completed chunks for channel "
+                      << other << std::endl;
+            ok = false;
+            break;
+          }
+        }
+
+        if (!ok) break;
 
         offset += this_chunk;
         global_chunk_idx++;
