@@ -6,6 +6,8 @@
 #include "sliding_window.h"
 #include "tcpx_interface.h"
 #include <iostream>
+#include <thread>
+#include <chrono>
 #include <cuda_runtime.h>
 
 SlidingWindow::SlidingWindow(int max_inflight)
@@ -38,23 +40,44 @@ int SlidingWindow::wait_and_release_oldest(void* comm, bool is_recv) {
   if (pending_reqs_.empty()) {
     return 0;  // Nothing to wait for
   }
-  
+
   void* oldest_req = pending_reqs_.front();
   int oldest_idx = pending_indices_.front();
   cudaEvent_t oldest_event = events_.front();
-  
+
   if (is_recv) {
-    // Server recv path: wait for kernel completion, then release TCPX slot
-    
+    // Server recv path:
+    // 1. Poll tcpx_test() until request completes (drives TCPX progress)
+    // 2. Wait for GPU kernel (if using kernel mode)
+    // 3. Call tcpx_irecv_consumed() to release TCPX slot
+
+    // Step 1: Wait for TCPX request to complete
+    // CRITICAL: Must call tcpx_test() to drive TCPX's internal state machine
+    // (see TCPX net_tcpx.cc:tcpxTest() which calls tcpxCommProgress())
+    int done = 0;
+    int received_size = 0;
+    while (!done) {
+      if (tcpx_test(oldest_req, &done, &received_size) != 0) {
+        std::cerr << "[SlidingWindow] tcpx_test failed for recv chunk "
+                  << oldest_idx << std::endl;
+        return -1;
+      }
+      // Small sleep to avoid busy-waiting
+      if (!done) {
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
+      }
+    }
+
+    // Step 2: Wait for GPU kernel (if applicable)
     if (oldest_event) {
       // Wait for GPU kernel to finish unpacking
       cudaError_t err = cudaEventSynchronize(oldest_event);
       if (err != cudaSuccess) {
-        std::cerr << "[SlidingWindow] cudaEventSynchronize failed for chunk " 
+        std::cerr << "[SlidingWindow] cudaEventSynchronize failed for chunk "
                   << oldest_idx << ": " << cudaGetErrorString(err) << std::endl;
         return -1;
       }
-      
+
       // Destroy the event (we're done with it)
       cudaError_t destroy_err = cudaEventDestroy(oldest_event);
       if (destroy_err != cudaSuccess) {
@@ -62,34 +85,40 @@ int SlidingWindow::wait_and_release_oldest(void* comm, bool is_recv) {
                   << cudaGetErrorString(destroy_err) << std::endl;
       }
     }
-    
-    // Release TCPX request slot
+
+    // Step 3: Release TCPX request slot
+    // Now that tcpx_test() returned done=1, we can safely call irecv_consumed
     if (tcpx_irecv_consumed(comm, 1, oldest_req) != 0) {
-      std::cerr << "[SlidingWindow] tcpx_irecv_consumed failed for chunk " 
+      std::cerr << "[SlidingWindow] tcpx_irecv_consumed failed for chunk "
                 << oldest_idx << std::endl;
       return -1;
     }
-    
+
   } else {
     // Client send path: poll until send completes
-    
+    // tcpx_test() drives TCPX progress and checks completion
+
     int done = 0;
-    int bytes = 0;  // tcpx_test requires valid int* for size
+    int sent_size = 0;
     while (!done) {
-      if (tcpx_test(oldest_req, &done, &bytes) != 0) {
-        std::cerr << "[SlidingWindow] tcpx_test failed for chunk "
+      if (tcpx_test(oldest_req, &done, &sent_size) != 0) {
+        std::cerr << "[SlidingWindow] tcpx_test failed for send chunk "
                   << oldest_idx << std::endl;
         return -1;
       }
+      // Small sleep to avoid busy-waiting
+      if (!done) {
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
+      }
     }
-    // TCPX automatically releases the request slot when done=1
+    // TCPX automatically releases the send request slot when done=1
   }
-  
+
   // Remove from window
   pending_reqs_.erase(pending_reqs_.begin());
   pending_indices_.erase(pending_indices_.begin());
   events_.erase(events_.begin());
-  
+
   return 0;
 }
 

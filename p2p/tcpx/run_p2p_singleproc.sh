@@ -71,7 +71,9 @@ export NCCL_GPUDIRECTTCPX_CTRL_DEV="eth0"
 export NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX="/run/tcpx"
 
 # NCCL settings
-export NCCL_NSOCKS_PERTHREAD=4
+# CRITICAL: Increase socket budget for single-process architecture
+# Each NIC sees 8 connections (one per GPU), need 8 sockets per NIC
+export NCCL_NSOCKS_PERTHREAD=8  # Was 4, increased for 8 GPUs
 export NCCL_SOCKET_NTHREADS=1
 export NCCL_DYNAMIC_CHUNK_SIZE=524288
 export NCCL_P2P_NET_CHUNKSIZE=524288

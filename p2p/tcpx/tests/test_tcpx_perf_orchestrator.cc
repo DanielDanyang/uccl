@@ -98,6 +98,7 @@
 #include "../include/channel_manager.h"
 #include "../include/bootstrap.h"
 #include "../include/tcpx_interface.h"
+#include "../include/sliding_window.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
@@ -565,21 +566,18 @@ int main(int argc, char** argv) {
     double total_time_ms = 0.0;
 
     // Sliding window: limit inflight requests per channel
-    // TCPX has MAX_REQUESTS=16 per comm, use 12 to be safe
-    constexpr int MAX_INFLIGHT_PER_CHANNEL = 12;
+    // Based on test_tcpx_perf_multi.cc successful pattern
+    constexpr int MAX_INFLIGHT_PER_CHANNEL = 16;  // TCPX MAX_REQUESTS per comm
 
-    struct PendingRecv {
-      void* request;
-      int gpu_id;
-      int channel_id;
-      int chunk_idx;
-    };
-
-    // Track pending requests per GPU per channel
-    std::vector<std::vector<std::vector<PendingRecv>>> pending_per_gpu_channel(kNumGPUs);
+    // Create sliding windows for each GPU's channels
+    // Structure: windows[gpu_id][channel_id] = SlidingWindow*
+    std::vector<std::vector<SlidingWindow*>> windows(kNumGPUs);
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       int num_channels = gpus[gpu_id].mgr->get_num_channels();
-      pending_per_gpu_channel[gpu_id].resize(num_channels);
+      windows[gpu_id].resize(num_channels);
+      for (int ch = 0; ch < num_channels; ch++) {
+        windows[gpu_id][ch] = new SlidingWindow(MAX_INFLIGHT_PER_CHANNEL);
+      }
     }
 
     for (int iter = 0; iter < iterations; ++iter) {
@@ -587,15 +585,17 @@ int main(int argc, char** argv) {
 
       auto start = std::chrono::high_resolution_clock::now();
 
-      // Clear pending requests for this iteration
+      // Clear sliding windows for this iteration
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
-        for (auto& channel_pending : pending_per_gpu_channel[gpu_id]) {
-          channel_pending.clear();
+        for (auto* win : windows[gpu_id]) {
+          win->clear();
         }
       }
 
       // Process all chunks with sliding window
       int global_chunk_idx = 0;
+      std::cout << "[SERVER] Starting to post receives for iteration " << iter << std::endl;
+
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
         int num_channels = ctx.mgr->get_num_channels();
@@ -606,6 +606,8 @@ int main(int argc, char** argv) {
           continue;
         }
 
+        std::cout << "[SERVER] Processing GPU " << gpu_id << " with " << num_channels << " channels" << std::endl;
+
         size_t offset = 0;
         int local_chunk_idx = 0;
 
@@ -615,22 +617,15 @@ int main(int argc, char** argv) {
           // Round-robin across channels within this GPU
           int channel_local_id = local_chunk_idx % num_channels;
           ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
-          auto& channel_pending = pending_per_gpu_channel[gpu_id][channel_local_id];
+          SlidingWindow* win = windows[gpu_id][channel_local_id];
 
           // Sliding window: wait if channel is full
-          while (channel_pending.size() >= MAX_INFLIGHT_PER_CHANNEL) {
-            // Check oldest request
-            auto& oldest = channel_pending.front();
-            int done = 0, received_size = 0;
-            tcpx_test(oldest.request, &done, &received_size);
-
-            if (done) {
-              // Mark as consumed and remove
-              tcpx_irecv_consumed(ch.recv_comm, 1, oldest.request);
-              channel_pending.erase(channel_pending.begin());
-            } else {
-              // Not done yet, sleep and retry
-              std::this_thread::sleep_for(std::chrono::microseconds(10));
+          if (win->is_full()) {
+            std::cout << "[SERVER] GPU " << gpu_id << " channel " << channel_local_id
+                      << " window full, waiting for oldest request..." << std::endl;
+            if (win->wait_and_release_oldest(ch.recv_comm, /*is_recv=*/true) != 0) {
+              std::cerr << "[ERROR] wait_and_release_oldest failed" << std::endl;
+              return 1;
             }
           }
 
@@ -655,37 +650,35 @@ int main(int argc, char** argv) {
             return 1;
           }
 
-          // Track this request
-          channel_pending.push_back({recv_request, gpu_id, channel_local_id, local_chunk_idx});
+          // Add to sliding window (no CUDA event for simple memcpy mode)
+          win->add_request(recv_request, local_chunk_idx, nullptr);
 
           offset += this_chunk;
           local_chunk_idx++;
           global_chunk_idx++;
         }
+
+        std::cout << "[SERVER] GPU " << gpu_id << " posted " << local_chunk_idx << " receives" << std::endl;
       }
 
-      // Drain all remaining requests
+      std::cout << "[SERVER] All receives posted, starting drain phase" << std::endl;
+
+      // Drain all remaining requests using SlidingWindow::drain_all()
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
         int num_channels = ctx.mgr->get_num_channels();
 
         for (int channel_local_id = 0; channel_local_id < num_channels; channel_local_id++) {
           ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
-          auto& channel_pending = pending_per_gpu_channel[gpu_id][channel_local_id];
+          SlidingWindow* win = windows[gpu_id][channel_local_id];
 
-          while (!channel_pending.empty()) {
-            auto& pending = channel_pending.front();
-            int done = 0, received_size = 0;
+          std::cout << "[SERVER] Draining GPU " << gpu_id << " channel " << channel_local_id
+                    << " (" << win->size() << " pending)" << std::endl;
 
-            while (!done) {
-              tcpx_test(pending.request, &done, &received_size);
-              if (!done) {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
-              }
-            }
-
-            tcpx_irecv_consumed(ch.recv_comm, 1, pending.request);
-            channel_pending.erase(channel_pending.begin());
+          if (win->drain_all(ch.recv_comm, /*is_recv=*/true) != 0) {
+            std::cerr << "[ERROR] drain_all failed for GPU " << gpu_id
+                      << " channel " << channel_local_id << std::endl;
+            return 1;
           }
         }
       }
@@ -713,6 +706,13 @@ int main(int argc, char** argv) {
     // ========================================
     // Cleanup
     // ========================================
+
+    // Clean up sliding windows
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      for (auto* win : windows[gpu_id]) {
+        delete win;
+      }
+    }
 
     for (auto& ctx : gpus) {
       ctx.mgr->deregister_memory(true);
@@ -869,18 +869,14 @@ int main(int argc, char** argv) {
     // Use 12 (same as multi-process test) to leave margin
     constexpr int MAX_INFLIGHT_SEND_PER_CHANNEL = 12;
 
-    struct PendingSend {
-      void* request;
-      int gpu_id;
-      int channel_id;
-      int chunk_idx;
-    };
-
-    // Track pending requests per GPU per channel
-    std::vector<std::vector<std::vector<PendingSend>>> pending_per_gpu_channel_send(kNumGPUs);
+    // Create sliding windows for each GPU's channels (client side)
+    std::vector<std::vector<SlidingWindow*>> send_windows(kNumGPUs);
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       int num_channels = gpus[gpu_id].mgr->get_num_channels();
-      pending_per_gpu_channel_send[gpu_id].resize(num_channels);
+      send_windows[gpu_id].resize(num_channels);
+      for (int ch = 0; ch < num_channels; ch++) {
+        send_windows[gpu_id][ch] = new SlidingWindow(MAX_INFLIGHT_SEND_PER_CHANNEL);
+      }
     }
 
     for (int iter = 0; iter < iterations; ++iter) {
@@ -888,10 +884,10 @@ int main(int argc, char** argv) {
 
       auto start = std::chrono::high_resolution_clock::now();
 
-      // Clear pending requests for this iteration
+      // Clear sliding windows for this iteration
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
-        for (auto& channel_pending : pending_per_gpu_channel_send[gpu_id]) {
-          channel_pending.clear();
+        for (auto* win : send_windows[gpu_id]) {
+          win->clear();
         }
       }
 
@@ -916,21 +912,13 @@ int main(int argc, char** argv) {
           // Round-robin across channels within this GPU
           int channel_local_id = local_chunk_idx % num_channels;
           ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
-          auto& channel_pending = pending_per_gpu_channel_send[gpu_id][channel_local_id];
+          SlidingWindow* win = send_windows[gpu_id][channel_local_id];
 
           // Sliding window: wait if channel is full
-          while (channel_pending.size() >= MAX_INFLIGHT_SEND_PER_CHANNEL) {
-            // Check oldest request
-            auto& oldest = channel_pending.front();
-            int done = 0, sent_size = 0;
-            tcpx_test(oldest.request, &done, &sent_size);
-
-            if (done) {
-              // Remove completed request
-              channel_pending.erase(channel_pending.begin());
-            } else {
-              // Not done yet, sleep and retry
-              std::this_thread::sleep_for(std::chrono::microseconds(10));
+          if (win->is_full()) {
+            if (win->wait_and_release_oldest(ch.send_comm, /*is_recv=*/false) != 0) {
+              std::cerr << "[ERROR] wait_and_release_oldest failed" << std::endl;
+              return 1;
             }
           }
 
@@ -950,8 +938,8 @@ int main(int argc, char** argv) {
             return 1;
           }
 
-          // Track this request
-          channel_pending.push_back({send_request, gpu_id, channel_local_id, local_chunk_idx});
+          // Add to sliding window
+          win->add_request(send_request, local_chunk_idx, nullptr);
 
           offset += this_chunk;
           local_chunk_idx++;
@@ -959,25 +947,19 @@ int main(int argc, char** argv) {
         }
       }
 
-      // Drain all remaining requests
+      // Drain all remaining requests using SlidingWindow::drain_all()
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
-        int num_channels = gpus[gpu_id].mgr->get_num_channels();
+        GPUContext& ctx = gpus[gpu_id];
+        int num_channels = ctx.mgr->get_num_channels();
 
         for (int channel_local_id = 0; channel_local_id < num_channels; channel_local_id++) {
-          auto& channel_pending = pending_per_gpu_channel_send[gpu_id][channel_local_id];
+          ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
+          SlidingWindow* win = send_windows[gpu_id][channel_local_id];
 
-          while (!channel_pending.empty()) {
-            auto& pending = channel_pending.front();
-            int done = 0, sent_size = 0;
-
-            while (!done) {
-              tcpx_test(pending.request, &done, &sent_size);
-              if (!done) {
-                std::this_thread::sleep_for(std::chrono::microseconds(10));
-              }
-            }
-
-            channel_pending.erase(channel_pending.begin());
+          if (win->drain_all(ch.send_comm, /*is_recv=*/false) != 0) {
+            std::cerr << "[ERROR] drain_all failed for GPU " << gpu_id
+                      << " channel " << channel_local_id << std::endl;
+            return 1;
           }
         }
       }
@@ -1005,6 +987,13 @@ int main(int argc, char** argv) {
     // ========================================
     // Cleanup
     // ========================================
+
+    // Clean up sliding windows
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      for (auto* win : send_windows[gpu_id]) {
+        delete win;
+      }
+    }
 
     for (auto& ctx : gpus) {
       ctx.mgr->deregister_memory(false);
