@@ -105,6 +105,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <chrono>
+#include <thread>
 
 namespace {
 
@@ -113,8 +115,9 @@ namespace {
 // ============================================================================
 
 constexpr int kNumGPUs = 8;  // A3-high instances have 8× H100 GPUs per node
-constexpr size_t kTransferSize = 64 * 1024 * 1024;  // 64 MB per GPU (for future data transfer)
-constexpr size_t kRegisteredBytes = kTransferSize + 4096;  // Extra space for alignment
+constexpr size_t kDefaultTransferSize = 64 * 1024 * 1024;  // 64 MB per GPU (default)
+constexpr size_t kMaxTransferSize = 256 * 1024 * 1024;  // 256 MB max per GPU
+constexpr size_t kRegisteredBytes = kMaxTransferSize + 4096;  // Extra space for alignment
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -129,6 +132,17 @@ constexpr size_t kRegisteredBytes = kTransferSize + 4096;  // Extra space for al
 int getEnvInt(const char* name, int def) {
   const char* v = std::getenv(name);
   return v ? std::atoi(v) : def;
+}
+
+/**
+ * @brief Get size_t from environment variable with default fallback
+ * @param name Environment variable name
+ * @param def Default value if not set
+ * @return Parsed size_t or default
+ */
+size_t getEnvSize(const char* name, size_t def) {
+  const char* v = std::getenv(name);
+  return v ? static_cast<size_t>(std::atoll(v)) : def;
 }
 
 /**
@@ -509,7 +523,122 @@ int main(int argc, char** argv) {
     std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
     std::cout << "Architecture: Single process, all NICs shared" << std::endl;
 
-    // TODO (Step 3): Add actual data receive and performance measurement here
+    // ========================================
+    // Step 4: Data Receive (NEW in Step 3)
+    // ========================================
+
+    std::cout << "\n[SERVER] Step 4: Starting data receive..." << std::endl;
+
+    // Get test parameters from environment
+    size_t test_size_per_gpu = getEnvSize("UCCL_TCPX_PERF_SIZE", kDefaultTransferSize);
+    int iterations = getEnvInt("UCCL_TCPX_PERF_ITERS", 20);
+    size_t chunk_bytes = getEnvSize("UCCL_TCPX_CHUNK_BYTES", 524288);  // 512KB default
+    const int kTransferTag = 42;
+
+    // Validate test_size fits in registered buffer
+    if (test_size_per_gpu > kMaxTransferSize) {
+      std::cerr << "[ERROR] UCCL_TCPX_PERF_SIZE (" << test_size_per_gpu
+                << ") exceeds max buffer size (" << kMaxTransferSize << ")" << std::endl;
+      return 1;
+    }
+
+    // Calculate actual total channels (handle potential mismatches)
+    int total_channels = 0;
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      total_channels += gpus[gpu_id].mgr->get_num_channels();
+    }
+
+    std::cout << "[SERVER] Test size per GPU: " << test_size_per_gpu << " bytes ("
+              << (test_size_per_gpu / (1024 * 1024)) << " MB)" << std::endl;
+    std::cout << "[SERVER] Total test size: " << (test_size_per_gpu * kNumGPUs) << " bytes ("
+              << (test_size_per_gpu * kNumGPUs / (1024 * 1024)) << " MB)" << std::endl;
+    std::cout << "[SERVER] Iterations: " << iterations << std::endl;
+    std::cout << "[SERVER] Chunk size: " << chunk_bytes << " bytes" << std::endl;
+    std::cout << "[SERVER] Total channels: " << total_channels << std::endl;
+
+    double total_time_ms = 0.0;
+
+    for (int iter = 0; iter < iterations; ++iter) {
+      std::cout << "\n[SERVER] ===== Iteration " << iter << " =====" << std::endl;
+
+      auto start = std::chrono::high_resolution_clock::now();
+
+      // Each GPU receives test_size_per_gpu bytes independently
+      // Round-robin chunks across channels within each GPU
+      int global_chunk_idx = 0;
+
+      for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+        GPUContext& ctx = gpus[gpu_id];
+        int num_channels = ctx.mgr->get_num_channels();
+
+        size_t offset = 0;
+        int local_chunk_idx = 0;
+
+        while (offset < test_size_per_gpu) {
+          size_t this_chunk = std::min(chunk_bytes, test_size_per_gpu - offset);
+
+          // Round-robin across channels within this GPU
+          int channel_local_id = local_chunk_idx % num_channels;
+          ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
+
+          // Calculate destination pointer within this GPU's buffer
+          void* dst_ptr = reinterpret_cast<void*>(
+              reinterpret_cast<uintptr_t>(ctx.gpu_buf) + offset);
+
+          // Unique tag for this chunk (must match client)
+          int tag = kTransferTag + iter * 100000 + gpu_id * 10000 + local_chunk_idx;
+
+          // Post receive
+          void* recv_data[1] = {dst_ptr};
+          int recv_sizes[1] = {static_cast<int>(this_chunk)};
+          int recv_tags[1] = {tag};
+          void* recv_mhandles[1] = {ch.mhandle};
+          void* recv_request = nullptr;
+
+          if (tcpx_irecv(ch.recv_comm, 1, recv_data, recv_sizes, recv_tags,
+                         recv_mhandles, &recv_request) != 0) {
+            std::cerr << "[ERROR] tcpx_irecv failed (GPU " << gpu_id
+                      << " channel " << channel_local_id << " chunk " << local_chunk_idx << ")" << std::endl;
+            return 1;
+          }
+
+          // Simple completion: wait for this recv to complete before next
+          int done = 0, received_size = 0;
+          while (!done) {
+            tcpx_test(recv_request, &done, &received_size);
+            if (!done) {
+              std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
+          }
+
+          // Mark as consumed
+          tcpx_irecv_consumed(ch.recv_comm, 1, recv_request);
+
+          offset += this_chunk;
+          local_chunk_idx++;
+          global_chunk_idx++;
+        }
+      }
+
+      auto end = std::chrono::high_resolution_clock::now();
+      double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      total_time_ms += elapsed_ms;
+
+      // Calculate bandwidth: total bytes transferred / time
+      size_t total_bytes = test_size_per_gpu * kNumGPUs;
+      double bandwidth_gbps = (total_bytes / (1024.0 * 1024.0 * 1024.0)) / (elapsed_ms / 1000.0);
+      std::cout << "[SERVER] Iteration " << iter << " completed in " << elapsed_ms
+                << " ms, bandwidth: " << bandwidth_gbps << " GB/s" << std::endl;
+    }
+
+    double avg_time_ms = total_time_ms / iterations;
+    size_t total_bytes = test_size_per_gpu * kNumGPUs;
+    double avg_bandwidth_gbps = (total_bytes / (1024.0 * 1024.0 * 1024.0)) / (avg_time_ms / 1000.0);
+
+    std::cout << "\n[SERVER] ===== Performance Summary =====" << std::endl;
+    std::cout << "[SERVER] Average time: " << avg_time_ms << " ms" << std::endl;
+    std::cout << "[SERVER] Average bandwidth: " << avg_bandwidth_gbps << " GB/s" << std::endl;
+    std::cout << "[SERVER] Total channels used: " << kNumGPUs * num_channels_per_gpu << std::endl;
 
     // ========================================
     // Cleanup
@@ -621,12 +750,118 @@ int main(int argc, char** argv) {
     std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
     std::cout << "Architecture: Single process, all NICs shared" << std::endl;
 
-    // TODO (Step 3): Add actual data send and performance measurement here
+    // ========================================
+    // Step 4: Data Transfer (NEW in Step 3)
+    // ========================================
 
-    // Wait for server to complete (so it can accept all 64 connections and register memory)
-    // Server needs time to sequentially accept 8 GPUs × 8 channels = 64 connections
-    std::cout << "\n[CLIENT] Waiting 30 seconds for server to accept all connections..." << std::endl;
-    sleep(30);
+    std::cout << "\n[CLIENT] Step 4: Starting data transfer..." << std::endl;
+
+    // Get test parameters from environment
+    size_t test_size_per_gpu = getEnvSize("UCCL_TCPX_PERF_SIZE", kDefaultTransferSize);
+    int iterations = getEnvInt("UCCL_TCPX_PERF_ITERS", 20);
+    size_t chunk_bytes = getEnvSize("UCCL_TCPX_CHUNK_BYTES", 524288);  // 512KB default
+    const int kTransferTag = 42;
+
+    // Validate test_size fits in registered buffer
+    if (test_size_per_gpu > kMaxTransferSize) {
+      std::cerr << "[ERROR] UCCL_TCPX_PERF_SIZE (" << test_size_per_gpu
+                << ") exceeds max buffer size (" << kMaxTransferSize << ")" << std::endl;
+      return 1;
+    }
+
+    // Calculate actual total channels (handle potential mismatches)
+    int total_channels = 0;
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      total_channels += gpus[gpu_id].mgr->get_num_channels();
+    }
+
+    std::cout << "[CLIENT] Test size per GPU: " << test_size_per_gpu << " bytes ("
+              << (test_size_per_gpu / (1024 * 1024)) << " MB)" << std::endl;
+    std::cout << "[CLIENT] Total test size: " << (test_size_per_gpu * kNumGPUs) << " bytes ("
+              << (test_size_per_gpu * kNumGPUs / (1024 * 1024)) << " MB)" << std::endl;
+    std::cout << "[CLIENT] Iterations: " << iterations << std::endl;
+    std::cout << "[CLIENT] Chunk size: " << chunk_bytes << " bytes" << std::endl;
+    std::cout << "[CLIENT] Total channels: " << total_channels << std::endl;
+
+    // Wait for server to be ready
+    std::cout << "\n[CLIENT] Waiting 5 seconds for server to be ready..." << std::endl;
+    sleep(5);
+
+    double total_time_ms = 0.0;
+
+    for (int iter = 0; iter < iterations; ++iter) {
+      std::cout << "\n[CLIENT] ===== Iteration " << iter << " =====" << std::endl;
+
+      auto start = std::chrono::high_resolution_clock::now();
+
+      // Each GPU sends test_size_per_gpu bytes independently
+      // Round-robin chunks across channels within each GPU
+      int global_chunk_idx = 0;
+
+      for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+        GPUContext& ctx = gpus[gpu_id];
+        int num_channels = ctx.mgr->get_num_channels();
+
+        size_t offset = 0;
+        int local_chunk_idx = 0;
+
+        while (offset < test_size_per_gpu) {
+          size_t this_chunk = std::min(chunk_bytes, test_size_per_gpu - offset);
+
+          // Round-robin across channels within this GPU
+          int channel_local_id = local_chunk_idx % num_channels;
+          ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
+
+          // Calculate source pointer within this GPU's buffer
+          void* src_ptr = reinterpret_cast<void*>(
+              reinterpret_cast<uintptr_t>(ctx.gpu_buf) + offset);
+
+          // Unique tag for this chunk (must match server)
+          int tag = kTransferTag + iter * 100000 + gpu_id * 10000 + local_chunk_idx;
+
+          // Send the chunk
+          void* send_request = nullptr;
+          if (tcpx_isend(ch.send_comm, src_ptr, static_cast<int>(this_chunk),
+                         tag, ch.mhandle, &send_request) != 0) {
+            std::cerr << "[ERROR] tcpx_isend failed (GPU " << gpu_id
+                      << " channel " << channel_local_id << " chunk " << local_chunk_idx << ")" << std::endl;
+            return 1;
+          }
+
+          // Simple completion: wait for this send to complete before next
+          int done = 0, sent_size = 0;
+          while (!done) {
+            tcpx_test(send_request, &done, &sent_size);
+            if (!done) {
+              std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
+          }
+
+          offset += this_chunk;
+          local_chunk_idx++;
+          global_chunk_idx++;
+        }
+      }
+
+      auto end = std::chrono::high_resolution_clock::now();
+      double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      total_time_ms += elapsed_ms;
+
+      // Calculate bandwidth: total bytes transferred / time
+      size_t total_bytes = test_size_per_gpu * kNumGPUs;
+      double bandwidth_gbps = (total_bytes / (1024.0 * 1024.0 * 1024.0)) / (elapsed_ms / 1000.0);
+      std::cout << "[CLIENT] Iteration " << iter << " completed in " << elapsed_ms
+                << " ms, bandwidth: " << bandwidth_gbps << " GB/s" << std::endl;
+    }
+
+    double avg_time_ms = total_time_ms / iterations;
+    size_t total_bytes = test_size_per_gpu * kNumGPUs;
+    double avg_bandwidth_gbps = (total_bytes / (1024.0 * 1024.0 * 1024.0)) / (avg_time_ms / 1000.0);
+
+    std::cout << "\n[CLIENT] ===== Performance Summary =====" << std::endl;
+    std::cout << "[CLIENT] Average time: " << avg_time_ms << " ms" << std::endl;
+    std::cout << "[CLIENT] Average bandwidth: " << avg_bandwidth_gbps << " GB/s" << std::endl;
+    std::cout << "[CLIENT] Total channels used: " << kNumGPUs * num_channels_per_gpu << std::endl;
 
     // ========================================
     // Cleanup

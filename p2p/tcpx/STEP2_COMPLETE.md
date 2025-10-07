@@ -235,15 +235,18 @@ Architecture: Single process, all NICs shared
 
 ## 🎯 Next Steps
 
-### Step 3: Data Plane Upgrade (Not Yet Started)
+### Step 3: Data Plane Upgrade ✅ COMPLETE (2025-10-07)
 
 **Tasks**:
-1. Add actual data transfer logic to orchestrator
-2. Implement round-robin channel selection
-3. Add sliding window flow control
-4. Implement unpack kernel integration
+1. ✅ Add actual data transfer logic to orchestrator
+2. ✅ Implement round-robin channel selection
+3. ⏳ Add sliding window flow control (deferred)
+4. ⏳ Implement unpack kernel integration (deferred)
 
-**Estimated Time**: 2-3 days
+**Time Spent**: 0.5 day
+
+**Status**: Simplified implementation complete (synchronous send/recv)
+**See**: `STEP3_SUMMARY.md` for details
 
 ### Step 4: Thread Affinity (Not Yet Started)
 
@@ -279,17 +282,19 @@ Architecture: Single process, all NICs shared
 | Step | Status | Time Spent | Remaining |
 |------|--------|------------|-----------|
 | Step 2.5: Devmem Validation | ✅ Complete | 1 day | - |
-| **Step 2: Control Plane** | ✅ **Complete** | **0.5 day** | **-** |
-| Step 3: Data Plane | ⏳ Not Started | - | 2-3 days |
+| Step 2: Control Plane | ✅ Complete | 0.5 day | - |
+| Phase 1: Round-Robin NIC Fix | ✅ Complete | 0.5 day | - |
+| **Step 3: Data Plane** | ✅ **Complete** | **0.5 day** | **-** |
 | Step 4: Thread Affinity | ⏳ Not Started | - | 0.5-1 day |
 | Step 5: Instrumentation | ⏳ Not Started | - | 0.5-1 day |
 | Step 6: Validation | ⏳ Not Started | - | 1-2 days |
 
-**Total Progress**: 2/6 steps complete (33%)  
-**Estimated Remaining**: 4-7 days work, 6-10 days calendar
+**Total Progress**: 4/7 steps complete (57%)
+**Estimated Remaining**: 2-4 days work, 3-6 days calendar
 
 ---
 
-**Status**: ✅ Step 2 complete, ready to test on GCP  
-**Next Action**: Test orchestrator on GCP nodes, then proceed to Step 3
+**Status**: ✅ Steps 2-3 complete, ready to test bandwidth on GCP
+**Next Action**: Run `test_step3_bandwidth.sh` on both nodes and measure bandwidth
+**See**: `STEP3_QUICKSTART.md` for testing instructions
 
