@@ -36,49 +36,46 @@ void SlidingWindow::add_request(void* request, int chunk_idx, cudaEvent_t event)
   events_.push_back(event);
 }
 
-int SlidingWindow::wait_and_release_oldest(void* comm, bool is_recv) {
+int SlidingWindow::try_release_oldest(void* comm, bool is_recv) {
   if (pending_reqs_.empty()) {
-    return 0;  // Nothing to wait for
+    return 0;  // Nothing to release
   }
 
   void* oldest_req = pending_reqs_.front();
   int oldest_idx = pending_indices_.front();
   cudaEvent_t oldest_event = events_.front();
 
+  // Step 1: Check if request is ready via tcpx_test()
+  // CRITICAL: tcpx_test() requires the request to be rq.next_transmitting()
+  // If it's not ready yet, tcpx_test() will return tcpxInternalError
+  // This is NOT a real error - just means "not your turn yet"
+  int done = 0;
+  int size = 0;
+  int rc = tcpx_test(oldest_req, &done, &size);
+
+  if (rc != 0) {
+    // Request not ready yet (not at front of TCPX's internal queue)
+    // This is expected behavior - just return "not ready"
+    return 1;  // Not ready, try again later
+  }
+
+  if (!done) {
+    // tcpx_test() succeeded but request not complete yet
+    // This is also expected - need to wait more
+    return 1;  // Not ready, try again later
+  }
+
+  // Step 2: Request is done! Now handle recv-specific cleanup
   if (is_recv) {
-    // Server recv path:
-    // 1. Poll tcpx_test() until request completes (drives TCPX progress)
-    // 2. Wait for GPU kernel (if using kernel mode)
-    // 3. Call tcpx_irecv_consumed() to release TCPX slot
-
-    // Step 1: Wait for TCPX request to complete
-    // CRITICAL: Must call tcpx_test() to drive TCPX's internal state machine
-    // (see TCPX net_tcpx.cc:tcpxTest() which calls tcpxCommProgress())
-    int done = 0;
-    int received_size = 0;
-    while (!done) {
-      if (tcpx_test(oldest_req, &done, &received_size) != 0) {
-        std::cerr << "[SlidingWindow] tcpx_test failed for recv chunk "
-                  << oldest_idx << std::endl;
-        return -1;
-      }
-      // Small sleep to avoid busy-waiting
-      if (!done) {
-        std::this_thread::sleep_for(std::chrono::microseconds(1));
-      }
-    }
-
-    // Step 2: Wait for GPU kernel (if applicable)
+    // Wait for GPU kernel (if applicable)
     if (oldest_event) {
-      // Wait for GPU kernel to finish unpacking
       cudaError_t err = cudaEventSynchronize(oldest_event);
       if (err != cudaSuccess) {
         std::cerr << "[SlidingWindow] cudaEventSynchronize failed for chunk "
                   << oldest_idx << ": " << cudaGetErrorString(err) << std::endl;
-        return -1;
+        return -1;  // Real error
       }
 
-      // Destroy the event (we're done with it)
       cudaError_t destroy_err = cudaEventDestroy(oldest_event);
       if (destroy_err != cudaSuccess) {
         std::cerr << "[SlidingWindow] cudaEventDestroy failed: "
@@ -86,45 +83,36 @@ int SlidingWindow::wait_and_release_oldest(void* comm, bool is_recv) {
       }
     }
 
-    // Step 3: Release TCPX request slot
-    // Now that tcpx_test() returned done=1, we can safely call irecv_consumed
+    // Release TCPX request slot
     if (tcpx_irecv_consumed(comm, 1, oldest_req) != 0) {
       std::cerr << "[SlidingWindow] tcpx_irecv_consumed failed for chunk "
                 << oldest_idx << std::endl;
-      return -1;
+      return -1;  // Real error
     }
-
-  } else {
-    // Client send path: poll until send completes
-    // tcpx_test() drives TCPX progress and checks completion
-
-    int done = 0;
-    int sent_size = 0;
-    while (!done) {
-      if (tcpx_test(oldest_req, &done, &sent_size) != 0) {
-        std::cerr << "[SlidingWindow] tcpx_test failed for send chunk "
-                  << oldest_idx << std::endl;
-        return -1;
-      }
-      // Small sleep to avoid busy-waiting
-      if (!done) {
-        std::this_thread::sleep_for(std::chrono::microseconds(1));
-      }
-    }
-    // TCPX automatically releases the send request slot when done=1
   }
+  // For send: TCPX automatically releases when done=1
 
-  // Remove from window
+  // Step 3: Remove from window
   pending_reqs_.erase(pending_reqs_.begin());
   pending_indices_.erase(pending_indices_.begin());
   events_.erase(events_.begin());
 
-  return 0;
+  return 0;  // Successfully released
 }
 
 int SlidingWindow::drain_all(void* comm, bool is_recv) {
   while (!pending_reqs_.empty()) {
-    if (wait_and_release_oldest(comm, is_recv) != 0) {
+    int rc = try_release_oldest(comm, is_recv);
+
+    if (rc == 0) {
+      // Successfully released, continue
+      continue;
+    } else if (rc == 1) {
+      // Not ready yet, sleep and retry
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      continue;
+    } else {
+      // Real error (rc == -1)
       std::cerr << "[SlidingWindow] Failed to drain request" << std::endl;
       return -1;
     }

@@ -620,11 +620,20 @@ int main(int argc, char** argv) {
           SlidingWindow* win = windows[gpu_id][channel_local_id];
 
           // Sliding window: wait if channel is full
-          if (win->is_full()) {
-            std::cout << "[SERVER] GPU " << gpu_id << " channel " << channel_local_id
-                      << " window full, waiting for oldest request..." << std::endl;
-            if (win->wait_and_release_oldest(ch.recv_comm, /*is_recv=*/true) != 0) {
-              std::cerr << "[ERROR] wait_and_release_oldest failed" << std::endl;
+          // Keep trying to release oldest until we have space
+          while (win->is_full()) {
+            int rc = win->try_release_oldest(ch.recv_comm, /*is_recv=*/true);
+
+            if (rc == 0) {
+              // Successfully released, window has space now
+              break;
+            } else if (rc == 1) {
+              // Not ready yet (not at front of TCPX queue), sleep and retry
+              std::this_thread::sleep_for(std::chrono::microseconds(10));
+            } else {
+              // Real error
+              std::cerr << "[ERROR] try_release_oldest failed for GPU " << gpu_id
+                        << " channel " << channel_local_id << std::endl;
               return 1;
             }
           }
@@ -915,9 +924,19 @@ int main(int argc, char** argv) {
           SlidingWindow* win = send_windows[gpu_id][channel_local_id];
 
           // Sliding window: wait if channel is full
-          if (win->is_full()) {
-            if (win->wait_and_release_oldest(ch.send_comm, /*is_recv=*/false) != 0) {
-              std::cerr << "[ERROR] wait_and_release_oldest failed" << std::endl;
+          // Keep trying to release oldest until we have space
+          while (win->is_full()) {
+            int rc = win->try_release_oldest(ch.send_comm, /*is_recv=*/false);
+
+            if (rc == 0) {
+              // Successfully released, window has space now
+              break;
+            } else if (rc == 1) {
+              // Not ready yet (not at front of TCPX queue), sleep and retry
+              std::this_thread::sleep_for(std::chrono::microseconds(10));
+            } else {
+              // Real error
+              std::cerr << "[ERROR] try_release_oldest failed" << std::endl;
               return 1;
             }
           }
