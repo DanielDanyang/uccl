@@ -47,42 +47,70 @@
 ## Critical Open Questions (MUST RESOLVE)
 
 ### 1. Bootstrap Concurrency Strategy
-**Problem**: 8 GPU workers in same address space need to establish connections
-**Questions**:
-- Single bootstrap thread (serialized) or concurrent per-GPU threads?
-- Port allocation: Fixed ranges per GPU or dynamic with SO_REUSEPORT?
-- How to ensure correct client/server GPU pairing?
+**Problem**: 8 GPU workers × 8 channels = 64 connections per node pair
+**Critical Details**:
+- Port allocation: `UCCL_TCPX_BOOTSTRAP_PORT_BASE + gpu_id * 8 + ch_id`
+  - GPU 0: ports 20000-20007 (8 channels)
+  - GPU 1: ports 20008-20015 (8 channels)
+  - GPU 7: ports 20056-20063 (8 channels)
+- Connection metadata: How does listener map incoming socket → (gpu_id, ch_id)?
+- Sequencing: All workers bind/listen concurrently, then connect in deterministic order
 
-**Options**:
-- **A**: Single bootstrap thread, serialize all handshakes (simple, slow)
-- **B**: Per-GPU port ranges (GPU 0: 20000-20007, GPU 1: 20008-20015, ...)
-- **C**: SO_REUSEPORT + connection metadata routing (complex, fast)
+**Chosen Approach** (Option B - Per-GPU Port Ranges):
+- Each worker thread binds its own port range (8 ports for 8 channels)
+- Server: All workers listen concurrently
+- Client: Connect in order (GPU 0 ch 0, GPU 0 ch 1, ..., GPU 7 ch 7)
+- Mapping: Port number directly encodes (gpu_id, ch_id)
 
-**Decision needed**: Before Step 2
+**Risks**:
+- Deadlock if connection order not deterministic
+- Mispairing if port calculation wrong
+
+**Mitigation**: Explicit connection sequencing, extensive logging
 
 ### 2. Devmem Resource Limits
 **Assumption**: Single-process → no devmem conflicts
 **Risk**: TCPX plugin may limit by channel/queue, not process
-**Validation**: Step 2.5 early test (1 process, 2 GPUs, same NIC)
+**Validation**: Step 2.5 early test - **MUST test multi-channel on same NIC**
+- 1 process, 1 GPU, **4 channels**, all on eth1
+- This is where original conflicts occurred!
 **Fallback**: If conflicts persist, contact Google or reconsider approach
 
-### 3. Thread Safety Guarantees
+### 3. NIC Configuration for Single Process
+**Problem**: Current launcher sets `NCCL_GPUDIRECTTCPX_SOCKET_IFNAME` to single NIC per worker
+**Required**: Single process must advertise all 4 NICs to plugin
+**Solution**:
+```bash
+# OLD (multi-process): Each worker sees 1 NIC
+export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1  # GPU 0-1
+export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth2  # GPU 2-3
+...
+
+# NEW (single-process): Process sees all NICs
+export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1,eth2,eth3,eth4
+```
+**Action**: Update launcher in Step 2
+
+### 4. Thread Safety Guarantees
 **Problem**: Current code not designed for multi-threading
-**Questions**:
-- Is TCPX plugin thread-safe for concurrent calls?
-- Does ChannelManager need global singleton or per-thread instances?
-- Where do we need mutexes?
+**Decisions**:
+- GlobalChannelManager singleton (not per-thread)
+- Mutex for devmem registration cache
+- Mutex for channel map
+- TCPX plugin thread safety: Assume safe (NCCL uses it multi-threaded)
 
-**Action**: Code audit + testing in Step 3
+**Action**: Implement in Step 3
 
-### 4. Thread Affinity Ownership
+### 5. Thread Affinity Ownership
 **Problem**: Both plugin and application may try to bind threads
-**Questions**:
-- Does TCPX plugin auto-bind based on env vars?
-- Do we need manual pthread_setaffinity_np()?
-- Risk of double binding or conflicts?
+**Checkpoint** (before Step 4):
+1. Run prototype with only env vars set
+2. Check actual CPU binding: `ps -eLo pid,tid,psr,comm`
+3. Decision:
+   - If threads auto-bind → use env vars only
+   - If threads NOT bound → implement manual pthread_setaffinity_np()
 
-**Action**: Investigate in Step 4 before implementing
+**Action**: Explicit checkpoint before Step 4 implementation
 
 ---
 
@@ -151,14 +179,17 @@
 **Why**: Verify single-process assumption before full refactor
 
 **Tasks**:
-1. **Create minimal test**: 1 process, 2 GPUs, 2 NICs
-   - GPU 0 uses eth1
-   - GPU 1 uses eth1 (same NIC!)
-   - Test if devmem conflict still occurs
+1. **Create minimal test**: 1 process, 1 GPU, **4 channels**, 1 NIC
+   - All 4 channels use eth1 (same NIC!)
+   - **This is where original conflicts occurred** (multi-channel on same NIC)
+   - Test if devmem conflict still occurs in single-process
 
-2. **Code audit**: Review TCPX plugin source
-   - Check if devmem registration is per-process or per-channel/queue
-   - Confirm resource limits (if any)
+2. **Test config**:
+   ```bash
+   export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1
+   export UCCL_TCPX_NUM_CHANNELS=4
+   # Run single-process test with 1 GPU, 4 channels
+   ```
 
 3. **Decision point**:
    - ✅ If no conflict → proceed to Step 3
