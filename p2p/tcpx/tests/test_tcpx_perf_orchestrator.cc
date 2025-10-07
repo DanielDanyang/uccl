@@ -564,23 +564,37 @@ int main(int argc, char** argv) {
 
     double total_time_ms = 0.0;
 
-    // Track all pending requests
+    // Sliding window: limit inflight requests per channel
+    // TCPX has MAX_REQUESTS=16 per comm, use 12 to be safe
+    constexpr int MAX_INFLIGHT_PER_CHANNEL = 12;
+
     struct PendingRecv {
       void* request;
       int gpu_id;
       int channel_id;
       int chunk_idx;
     };
-    std::vector<PendingRecv> pending_recvs;
+
+    // Track pending requests per GPU per channel
+    std::vector<std::vector<std::vector<PendingRecv>>> pending_per_gpu_channel(kNumGPUs);
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      int num_channels = gpus[gpu_id].mgr->get_num_channels();
+      pending_per_gpu_channel[gpu_id].resize(num_channels);
+    }
 
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "\n[SERVER] ===== Iteration " << iter << " =====" << std::endl;
 
       auto start = std::chrono::high_resolution_clock::now();
 
-      pending_recvs.clear();
+      // Clear pending requests for this iteration
+      for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+        for (auto& channel_pending : pending_per_gpu_channel[gpu_id]) {
+          channel_pending.clear();
+        }
+      }
 
-      // Phase 1: Post all receives (async)
+      // Process all chunks with sliding window
       int global_chunk_idx = 0;
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
@@ -601,6 +615,24 @@ int main(int argc, char** argv) {
           // Round-robin across channels within this GPU
           int channel_local_id = local_chunk_idx % num_channels;
           ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
+          auto& channel_pending = pending_per_gpu_channel[gpu_id][channel_local_id];
+
+          // Sliding window: wait if channel is full
+          while (channel_pending.size() >= MAX_INFLIGHT_PER_CHANNEL) {
+            // Check oldest request
+            auto& oldest = channel_pending.front();
+            int done = 0, received_size = 0;
+            tcpx_test(oldest.request, &done, &received_size);
+
+            if (done) {
+              // Mark as consumed and remove
+              tcpx_irecv_consumed(ch.recv_comm, 1, oldest.request);
+              channel_pending.erase(channel_pending.begin());
+            } else {
+              // Not done yet, sleep and retry
+              std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
+          }
 
           // Calculate destination pointer within this GPU's buffer
           void* dst_ptr = reinterpret_cast<void*>(
@@ -624,7 +656,7 @@ int main(int argc, char** argv) {
           }
 
           // Track this request
-          pending_recvs.push_back({recv_request, gpu_id, channel_local_id, local_chunk_idx});
+          channel_pending.push_back({recv_request, gpu_id, channel_local_id, local_chunk_idx});
 
           offset += this_chunk;
           local_chunk_idx++;
@@ -632,22 +664,30 @@ int main(int argc, char** argv) {
         }
       }
 
-      std::cout << "[SERVER] Posted " << pending_recvs.size() << " async receives" << std::endl;
+      // Drain all remaining requests
+      for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+        GPUContext& ctx = gpus[gpu_id];
+        int num_channels = ctx.mgr->get_num_channels();
 
-      // Phase 2: Wait for all receives to complete
-      for (auto& pending : pending_recvs) {
-        int done = 0, received_size = 0;
-        while (!done) {
-          tcpx_test(pending.request, &done, &received_size);
-          if (!done) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+        for (int channel_local_id = 0; channel_local_id < num_channels; channel_local_id++) {
+          ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
+          auto& channel_pending = pending_per_gpu_channel[gpu_id][channel_local_id];
+
+          while (!channel_pending.empty()) {
+            auto& pending = channel_pending.front();
+            int done = 0, received_size = 0;
+
+            while (!done) {
+              tcpx_test(pending.request, &done, &received_size);
+              if (!done) {
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+              }
+            }
+
+            tcpx_irecv_consumed(ch.recv_comm, 1, pending.request);
+            channel_pending.erase(channel_pending.begin());
           }
         }
-
-        // Mark as consumed
-        GPUContext& ctx = gpus[pending.gpu_id];
-        ChannelResources& ch = ctx.mgr->get_channel(pending.channel_id);
-        tcpx_irecv_consumed(ch.recv_comm, 1, pending.request);
       }
 
       auto end = std::chrono::high_resolution_clock::now();
@@ -825,23 +865,37 @@ int main(int argc, char** argv) {
 
     double total_time_ms = 0.0;
 
-    // Track all pending requests
+    // Sliding window: limit inflight requests per channel
+    // Use 12 (same as multi-process test) to leave margin
+    constexpr int MAX_INFLIGHT_SEND_PER_CHANNEL = 12;
+
     struct PendingSend {
       void* request;
       int gpu_id;
       int channel_id;
       int chunk_idx;
     };
-    std::vector<PendingSend> pending_sends;
+
+    // Track pending requests per GPU per channel
+    std::vector<std::vector<std::vector<PendingSend>>> pending_per_gpu_channel_send(kNumGPUs);
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      int num_channels = gpus[gpu_id].mgr->get_num_channels();
+      pending_per_gpu_channel_send[gpu_id].resize(num_channels);
+    }
 
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "\n[CLIENT] ===== Iteration " << iter << " =====" << std::endl;
 
       auto start = std::chrono::high_resolution_clock::now();
 
-      pending_sends.clear();
+      // Clear pending requests for this iteration
+      for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+        for (auto& channel_pending : pending_per_gpu_channel_send[gpu_id]) {
+          channel_pending.clear();
+        }
+      }
 
-      // Phase 1: Post all sends (async)
+      // Process all chunks with sliding window
       int global_chunk_idx = 0;
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
@@ -862,6 +916,23 @@ int main(int argc, char** argv) {
           // Round-robin across channels within this GPU
           int channel_local_id = local_chunk_idx % num_channels;
           ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
+          auto& channel_pending = pending_per_gpu_channel_send[gpu_id][channel_local_id];
+
+          // Sliding window: wait if channel is full
+          while (channel_pending.size() >= MAX_INFLIGHT_SEND_PER_CHANNEL) {
+            // Check oldest request
+            auto& oldest = channel_pending.front();
+            int done = 0, sent_size = 0;
+            tcpx_test(oldest.request, &done, &sent_size);
+
+            if (done) {
+              // Remove completed request
+              channel_pending.erase(channel_pending.begin());
+            } else {
+              // Not done yet, sleep and retry
+              std::this_thread::sleep_for(std::chrono::microseconds(10));
+            }
+          }
 
           // Calculate source pointer within this GPU's buffer
           void* src_ptr = reinterpret_cast<void*>(
@@ -880,7 +951,7 @@ int main(int argc, char** argv) {
           }
 
           // Track this request
-          pending_sends.push_back({send_request, gpu_id, channel_local_id, local_chunk_idx});
+          channel_pending.push_back({send_request, gpu_id, channel_local_id, local_chunk_idx});
 
           offset += this_chunk;
           local_chunk_idx++;
@@ -888,15 +959,25 @@ int main(int argc, char** argv) {
         }
       }
 
-      std::cout << "[CLIENT] Posted " << pending_sends.size() << " async sends" << std::endl;
+      // Drain all remaining requests
+      for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+        int num_channels = gpus[gpu_id].mgr->get_num_channels();
 
-      // Phase 2: Wait for all sends to complete
-      for (auto& pending : pending_sends) {
-        int done = 0, sent_size = 0;
-        while (!done) {
-          tcpx_test(pending.request, &done, &sent_size);
-          if (!done) {
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
+        for (int channel_local_id = 0; channel_local_id < num_channels; channel_local_id++) {
+          auto& channel_pending = pending_per_gpu_channel_send[gpu_id][channel_local_id];
+
+          while (!channel_pending.empty()) {
+            auto& pending = channel_pending.front();
+            int done = 0, sent_size = 0;
+
+            while (!done) {
+              tcpx_test(pending.request, &done, &sent_size);
+              if (!done) {
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
+              }
+            }
+
+            channel_pending.erase(channel_pending.begin());
           }
         }
       }

@@ -372,6 +372,72 @@ std::cout << "Total channels: " << total_channels_ready << std::endl;
 
 ---
 
+---
+
+### Bug 6: Channel Saturation (CRITICAL) ✅
+
+**Problem**:
+- Code posted all 1024 requests at once (8 GPUs × 128 chunks)
+- TCPX has `MAX_REQUESTS=16` per comm
+- 1024 requests / 32 channels = 32 requests per channel
+- 32 > 16 → overflow → accept/send failures
+
+**Root Cause**:
+```cpp
+// BROKEN: Post all at once
+std::vector<PendingRecv> pending_recvs;
+for (int gpu_id = 0; gpu_id < 8; gpu_id++) {
+  for (int chunk = 0; chunk < 128; chunk++) {
+    tcpx_irecv(..., &request);
+    pending_recvs.push_back(request);  // NO LIMIT!
+  }
+}
+// Total: 1024 inflight requests → channel saturation
+```
+
+**Symptoms**:
+```
+[ChannelManager] Failed to accept connection for channel 0 after 100 retries
+[ERROR] tcpx_isend failed (GPU 0 channel 0 chunk 64)
+```
+
+**Fix**:
+```cpp
+// CORRECT: Sliding window per channel
+constexpr int MAX_INFLIGHT_PER_CHANNEL = 12;  // Safe limit (< 16)
+
+std::vector<std::vector<std::vector<PendingRecv>>> pending_per_gpu_channel(kNumGPUs);
+
+for each chunk:
+  auto& channel_pending = pending_per_gpu_channel[gpu_id][channel_id];
+
+  // Wait if channel is full
+  while (channel_pending.size() >= MAX_INFLIGHT_PER_CHANNEL) {
+    // Drain oldest request
+    if (oldest is done) {
+      consume and remove
+    }
+  }
+
+  // Post new request
+  tcpx_irecv(..., &request);
+  channel_pending.push_back(request);
+```
+
+**Impact**:
+- ✅ Never exceeds TCPX limit (12 < 16)
+- ✅ Prevents accept/send failures
+- ✅ Maintains throughput (12 is enough to saturate NIC)
+- ✅ Matches successful multi-process pattern
+
+**Locations Fixed**:
+- Server: lines 567-702 (sliding window receive loop)
+- Client: lines 866-994 (sliding window send loop)
+
+**Reference**: `test_tcpx_perf_multi.cc` uses same pattern successfully
+
+---
+
 ## 📊 Summary of All Fixes
 
 | Bug | Severity | Status | Impact |
@@ -381,6 +447,7 @@ std::cout << "Total channels: " << total_channels_ready << std::endl;
 | 3. Channel count assumption | MEDIUM | ✅ Fixed | Robust to variations |
 | 4. Division by zero (SIGFPE) | CRITICAL | ✅ Fixed | Prevents crashes |
 | 5. Incorrect channel logging | MEDIUM | ✅ Fixed | Accurate reporting |
+| 6. Channel saturation | CRITICAL | ✅ Fixed | Prevents failures |
 
 ---
 
