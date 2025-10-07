@@ -1,19 +1,98 @@
 /**
  * @file test_tcpx_perf_orchestrator.cc
- * @brief Single-process orchestrator for 8 GPUs
- * 
- * Architecture:
- * - 1 process per node
- * - Manages all 8 GPUs
- * - Each GPU can use multiple channels
- * - All 4 NICs available to all GPUs (no devmem conflicts)
- * 
- * Usage:
- *   # Server
+ * @brief Single-process orchestrator for 8 GPUs - Core of single-process architecture
+ *
+ * PURPOSE:
+ * ========
+ * This is the main test program for the single-process P2P architecture refactor.
+ * It demonstrates that a SINGLE process can manage ALL 8 GPUs and share ALL 4 NICs
+ * without devmem conflicts (which plagued the old multi-process architecture).
+ *
+ * ARCHITECTURE COMPARISON:
+ * ========================
+ *
+ * OLD (Multi-Process):
+ *   Node
+ *   ├── Process 0 (GPU 0, eth1 only, 1 channel)  ← devmem conflict
+ *   ├── Process 1 (GPU 1, eth1 only, 1 channel)  ← devmem conflict
+ *   ├── Process 2 (GPU 2, eth2 only, 1 channel)
+ *   ...
+ *   └── Process 7 (GPU 7, eth4 only, 1 channel)
+ *
+ *   Problem: Multiple processes cannot share NICs due to devmem-tcp limitations
+ *   Result: Each GPU stuck with 1 NIC, low bandwidth
+ *
+ * NEW (Single-Process):
+ *   Node
+ *   └── Single Process
+ *       ├── GPU 0 (8 channels, all 4 NICs available)  ← No conflict!
+ *       ├── GPU 1 (8 channels, all 4 NICs available)
+ *       ├── GPU 2 (8 channels, all 4 NICs available)
+ *       ...
+ *       └── GPU 7 (8 channels, all 4 NICs available)
+ *
+ *   Benefit: All GPUs can use all NICs, higher bandwidth potential
+ *   Total: 64 channels (8 GPUs × 8 channels), 4 NICs shared
+ *
+ * EXECUTION FLOW:
+ * ===============
+ *
+ * Server Side:
+ *   1. Initialize all 8 GPUs (CUDA contexts, allocate buffers)
+ *   2. Listen on all channels (ChannelManager.server_listen_all)
+ *   3. Bootstrap handshake (send channel handles to client)
+ *   4. Accept connections from client
+ *   5. Register GPU memory for RDMA (tcpx_reg_mr)
+ *   6. [Future] Receive data and measure performance
+ *
+ * Client Side:
+ *   1. Initialize all 8 GPUs
+ *   2. Bootstrap handshake (receive channel handles from server)
+ *   3. Connect to server channels
+ *   4. Register GPU memory for RDMA
+ *   5. [Future] Send data and measure performance
+ *
+ * KEY DESIGN DECISIONS:
+ * =====================
+ *
+ * 1. Per-GPU ChannelManager:
+ *    - Each GPU has its own ChannelManager instance
+ *    - Manages multiple channels (default: 8) for that GPU
+ *    - Handles TCPX listen/connect/accept for all channels
+ *
+ * 2. Bootstrap Strategy:
+ *    - One bootstrap connection per GPU (ports 20000-20007)
+ *    - Each connection sends ALL channel handles for that GPU
+ *    - Avoids the "one bootstrap per channel" overhead
+ *
+ * 3. Handle Caching:
+ *    - Handles from server_listen_all() are cached in GPUContext
+ *    - Reused during bootstrap (no duplicate listen calls)
+ *    - Prevents resource leaks and "already listening" errors
+ *
+ * 4. Sequential Execution:
+ *    - All GPUs listen → all GPUs bootstrap → all GPUs accept
+ *    - Avoids race conditions from concurrent listen/accept
+ *    - Simpler to debug than fully concurrent approach
+ *
+ * CURRENT STATUS:
+ * ===============
+ * This version only establishes channels and registers memory.
+ * Actual data transfer and performance measurement will be added in Step 3.
+ *
+ * USAGE:
+ * ======
+ *   # Server (Node 0)
  *   UCCL_TCPX_NUM_CHANNELS=8 ./tests/test_tcpx_perf_orchestrator server
- *   
- *   # Client
+ *
+ *   # Client (Node 1)
  *   UCCL_TCPX_NUM_CHANNELS=8 ./tests/test_tcpx_perf_orchestrator client <server_ip>
+ *
+ * ENVIRONMENT VARIABLES:
+ * ======================
+ *   UCCL_TCPX_NUM_CHANNELS         - Channels per GPU (default: 8)
+ *   UCCL_TCPX_BOOTSTRAP_PORT_BASE  - Base port for bootstrap (default: 20000)
+ *   NCCL_GPUDIRECTTCPX_SOCKET_IFNAME - NICs to use (should be "eth1,eth2,eth3,eth4")
  */
 
 #include "../include/channel_manager.h"
@@ -29,15 +108,35 @@
 
 namespace {
 
-constexpr int kNumGPUs = 8;
-constexpr size_t kTransferSize = 64 * 1024 * 1024;  // 64 MB per GPU
-constexpr size_t kRegisteredBytes = kTransferSize + 4096;
+// ============================================================================
+// CONSTANTS
+// ============================================================================
 
+constexpr int kNumGPUs = 8;  // A3-high instances have 8× H100 GPUs per node
+constexpr size_t kTransferSize = 64 * 1024 * 1024;  // 64 MB per GPU (for future data transfer)
+constexpr size_t kRegisteredBytes = kTransferSize + 4096;  // Extra space for alignment
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+/**
+ * @brief Get integer from environment variable with default fallback
+ * @param name Environment variable name
+ * @param def Default value if not set
+ * @return Parsed integer or default
+ */
 int getEnvInt(const char* name, int def) {
   const char* v = std::getenv(name);
   return v ? std::atoi(v) : def;
 }
 
+/**
+ * @brief Check CUDA Driver API result and print error if failed
+ * @param res CUDA result code
+ * @param msg Context message for error
+ * @return true if success, false if failed
+ */
 bool cuda_check(CUresult res, const char* msg) {
   if (res != CUDA_SUCCESS) {
     const char* err_str = nullptr;
@@ -48,6 +147,12 @@ bool cuda_check(CUresult res, const char* msg) {
   return true;
 }
 
+/**
+ * @brief Check CUDA Runtime API result and print error if failed
+ * @param err CUDA error code
+ * @param msg Context message for error
+ * @return true if success, false if failed
+ */
 bool cuda_check(cudaError_t err, const char* msg) {
   if (err != cudaSuccess) {
     std::cerr << "[ERROR] " << msg << " failed: " << cudaGetErrorString(err) << std::endl;
@@ -56,24 +161,64 @@ bool cuda_check(cudaError_t err, const char* msg) {
   return true;
 }
 
-struct GPUContext {
-  int gpu_id;
-  CUdevice cuDev;
-  CUcontext cuCtx;
-  CUdeviceptr d_base;
-  void* gpu_buf;
-  ChannelManager* mgr;
-  int num_channels;
-  int bootstrap_port;
-  std::vector<ncclNetHandle_v7> handles;  // Cache handles from server_listen_all
+// ============================================================================
+// GPU CONTEXT STRUCTURE
+// ============================================================================
 
+/**
+ * @brief Per-GPU context holding all resources for one GPU
+ *
+ * This structure encapsulates everything needed to manage one GPU:
+ * - CUDA context and device handles
+ * - GPU memory buffer (4KB aligned for devmem-tcp)
+ * - ChannelManager for TCPX channels
+ * - Bootstrap configuration
+ * - Cached channel handles (to avoid duplicate listen calls)
+ *
+ * Lifecycle:
+ * 1. Constructor: Initialize to default values
+ * 2. Main: Allocate CUDA resources, create ChannelManager
+ * 3. Destructor: Clean up all resources (memory, context, manager)
+ */
+struct GPUContext {
+  // GPU identification
+  int gpu_id;                  // GPU index (0-7)
+
+  // CUDA resources
+  CUdevice cuDev;              // CUDA device handle
+  CUcontext cuCtx;             // CUDA context (retained primary context)
+  CUdeviceptr d_base;          // Base GPU memory allocation
+  void* gpu_buf;               // 4KB-aligned GPU buffer pointer
+
+  // TCPX channel management
+  ChannelManager* mgr;         // Manages all channels for this GPU
+  int num_channels;            // Number of channels (e.g., 8)
+
+  // Bootstrap configuration
+  int bootstrap_port;          // Port for bootstrap handshake (20000 + gpu_id)
+
+  // Handle caching (CRITICAL: prevents duplicate listen calls)
+  std::vector<ncclNetHandle_v7> handles;  // Cached from server_listen_all()
+
+  /**
+   * @brief Default constructor - initialize all fields to safe defaults
+   */
   GPUContext() : gpu_id(-1), cuDev(0), cuCtx(nullptr), d_base(0),
                  gpu_buf(nullptr), mgr(nullptr), num_channels(0), bootstrap_port(0) {}
 
+  /**
+   * @brief Destructor - clean up all resources
+   *
+   * Order matters:
+   * 1. Delete ChannelManager (closes TCPX channels)
+   * 2. Free GPU memory
+   * 3. Release CUDA primary context (matches cuDevicePrimaryCtxRetain)
+   */
   ~GPUContext() {
     if (mgr) delete mgr;
     if (d_base) cuMemFree(d_base);
-    // Release CUDA primary context (avoid leak)
+    // CRITICAL: Release primary context to avoid leak
+    // Every cuDevicePrimaryCtxRetain() must have a matching Release()
     if (cuCtx) {
       cuDevicePrimaryCtxRelease(cuDev);
     }
@@ -82,7 +227,29 @@ struct GPUContext {
 
 }  // namespace
 
+// ============================================================================
+// MAIN FUNCTION
+// ============================================================================
+
+/**
+ * @brief Main entry point for single-process orchestrator
+ *
+ * This function orchestrates the entire P2P setup for all 8 GPUs:
+ * 1. Parse command-line arguments (server vs client)
+ * 2. Load TCPX plugin
+ * 3. Initialize all 8 GPUs (CUDA contexts, buffers, ChannelManagers)
+ * 4. Execute server or client flow
+ * 5. Clean up resources
+ *
+ * @param argc Argument count
+ * @param argv Arguments: <server|client> [server_ip]
+ * @return 0 on success, 1 on failure
+ */
 int main(int argc, char** argv) {
+  // ========================================
+  // Parse Arguments
+  // ========================================
+
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0] << " <server|client> [server_ip]" << std::endl;
     return 1;
@@ -90,16 +257,19 @@ int main(int argc, char** argv) {
 
   bool is_server = (std::strcmp(argv[1], "server") == 0);
   const char* server_ip = (argc > 2) ? argv[2] : nullptr;
-  
+
   if (!is_server && !server_ip) {
     std::cerr << "[ERROR] Client mode requires server_ip" << std::endl;
     return 1;
   }
-  
-  // Configuration
+
+  // ========================================
+  // Configuration from Environment
+  // ========================================
+
   int num_channels_per_gpu = getEnvInt("UCCL_TCPX_NUM_CHANNELS", 8);
   int bootstrap_port_base = getEnvInt("UCCL_TCPX_BOOTSTRAP_PORT_BASE", 20000);
-  
+
   std::cout << "=== Single-Process P2P Orchestrator ===" << std::endl;
   std::cout << "Role: " << (is_server ? "server" : "client") << std::endl;
   std::cout << "GPUs: " << kNumGPUs << std::endl;
@@ -107,70 +277,135 @@ int main(int argc, char** argv) {
   std::cout << "Bootstrap port base: " << bootstrap_port_base << std::endl;
   std::cout << "=======================================" << std::endl << std::endl;
 
-  // Load TCPX plugin
+  // ========================================
+  // Load TCPX Plugin
+  // ========================================
+
+  // The TCPX plugin provides the GPUDirect-TCPX network interface
+  // It must be loaded before any TCPX operations
   const char* plugin_path = std::getenv("NCCL_GPUDIRECTTCPX_PLUGIN_PATH");
   if (!plugin_path) {
     plugin_path = "/usr/local/tcpx/lib64/libnccl-net.so";
   }
-  
+
   if (tcpx_load_plugin(plugin_path) != 0) {
     std::cerr << "[ERROR] Failed to load TCPX plugin from " << plugin_path << std::endl;
     return 1;
   }
-  
+
+  // Query available TCPX devices (NICs)
+  // In single-process architecture, all NICs are visible to all GPUs
   int ndev = tcpx_get_device_count();
   std::cout << "[INFO] TCPX devices: " << ndev << std::endl;
   std::cout << "[INFO] All GPUs can use all " << ndev << " NICs (single-process architecture)" << std::endl << std::endl;
 
-  // Initialize CUDA for all GPUs
+  // ========================================
+  // Initialize CUDA
+  // ========================================
+
+  // Initialize CUDA Driver API (required for cuMemAlloc, cuCtxSetCurrent, etc.)
   if (!cuda_check(cuInit(0), "cuInit")) {
     return 1;
   }
 
-  // Create contexts for all GPUs
+  // ========================================
+  // Create GPU Contexts
+  // ========================================
+
+  // Allocate context structures for all 8 GPUs
+  // These will be populated in the loop below
   std::vector<GPUContext> gpus(kNumGPUs);
   
+  // ========================================
+  // Initialize Each GPU
+  // ========================================
+
+  // For each GPU, we need to:
+  // 1. Get CUDA device handle
+  // 2. Retain primary context (for CUDA operations)
+  // 3. Allocate GPU memory (4KB aligned for devmem-tcp)
+  // 4. Create ChannelManager (for TCPX channels)
+
   for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
     GPUContext& ctx = gpus[gpu_id];
     ctx.gpu_id = gpu_id;
     ctx.num_channels = num_channels_per_gpu;
-    ctx.bootstrap_port = bootstrap_port_base + gpu_id;
-    
+    ctx.bootstrap_port = bootstrap_port_base + gpu_id;  // e.g., 20000, 20001, ...
+
     std::cout << "[GPU " << gpu_id << "] Initializing..." << std::endl;
-    
-    if (!cuda_check(cuDeviceGet(&ctx.cuDev, gpu_id), "cuDeviceGet") ||
-        !cuda_check(cuDevicePrimaryCtxRetain(&ctx.cuCtx, ctx.cuDev), "cuDevicePrimaryCtxRetain") ||
-        !cuda_check(cuCtxSetCurrent(ctx.cuCtx), "cuCtxSetCurrent") ||
-        !cuda_check(cudaSetDevice(gpu_id), "cudaSetDevice")) {
+
+    // Get CUDA device handle
+    if (!cuda_check(cuDeviceGet(&ctx.cuDev, gpu_id), "cuDeviceGet")) {
       return 1;
     }
-    
-    // Allocate GPU buffer (4KB aligned)
+
+    // Retain primary context (CRITICAL: must be released in destructor)
+    if (!cuda_check(cuDevicePrimaryCtxRetain(&ctx.cuCtx, ctx.cuDev), "cuDevicePrimaryCtxRetain")) {
+      return 1;
+    }
+
+    // Set current context (for subsequent CUDA calls)
+    if (!cuda_check(cuCtxSetCurrent(ctx.cuCtx), "cuCtxSetCurrent")) {
+      return 1;
+    }
+
+    // Set device for Runtime API calls
+    if (!cuda_check(cudaSetDevice(gpu_id), "cudaSetDevice")) {
+      return 1;
+    }
+
+    // Allocate GPU buffer with extra space for alignment
+    // devmem-tcp requires 4KB (4096 byte) alignment
     if (!cuda_check(cuMemAlloc(&ctx.d_base, kRegisteredBytes + 4096), "cuMemAlloc")) {
       return 1;
     }
-    
+
+    // Align to 4KB boundary
+    // Formula: (addr + 4095) & ~4095 rounds up to next 4KB boundary
     uintptr_t addr = static_cast<uintptr_t>(ctx.d_base);
     addr = (addr + 4095) & ~static_cast<uintptr_t>(4095);
     ctx.gpu_buf = reinterpret_cast<void*>(addr);
-    
+
     std::cout << "[GPU " << gpu_id << "] Buffer allocated: " << ctx.gpu_buf << std::endl;
-    
-    // Create ChannelManager
+
+    // Create ChannelManager for this GPU
+    // This will manage all TCPX channels for this GPU
     ctx.mgr = new ChannelManager(ctx.num_channels, gpu_id);
   }
-  
+
   std::cout << "\n[INFO] All GPUs initialized" << std::endl << std::endl;
 
+  // ========================================
+  // SERVER or CLIENT Flow
+  // ========================================
+
   if (is_server) {
-    // ===== SERVER: Manage all 8 GPUs =====
-    
+    // ========================================================================
+    // SERVER FLOW
+    // ========================================================================
+
+    // The server flow has 4 main steps:
+    // 1. Listen on all channels (create listen_comm for each channel)
+    // 2. Bootstrap handshake (send channel handles to client)
+    // 3. Accept connections (wait for client to connect)
+    // 4. Register memory (prepare GPU buffers for RDMA)
+
+    // ========================================
+    // Step 1: Listen on All Channels
+    // ========================================
+
     std::cout << "[SERVER] Step 1: Listening on all GPUs..." << std::endl;
 
-    // Listen on all GPUs and cache handles
+    // For each GPU, call server_listen_all() to:
+    // - Create listen_comm for each channel
+    // - Generate handles that client will use to connect
+    // - Cache handles in GPUContext (CRITICAL: avoid duplicate listen)
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
 
+      // CRITICAL: Cache handles in ctx.handles to avoid duplicate listen
+      // Calling server_listen_all() twice would leak listen_comm descriptors
       if (ctx.mgr->server_listen_all(ctx.handles) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": server_listen_all failed" << std::endl;
         return 1;
@@ -180,19 +415,31 @@ int main(int argc, char** argv) {
                 << " channels (cached " << ctx.handles.size() << " handles)" << std::endl;
     }
 
+    // ========================================
+    // Step 2: Bootstrap Handshake
+    // ========================================
+
     std::cout << "\n[SERVER] Step 2: Bootstrap handshake..." << std::endl;
 
-    // Bootstrap: send cached handles to client (one connection per GPU)
+    // Bootstrap is a simple TCP connection used to exchange channel handles
+    // Strategy: One bootstrap connection per GPU
+    // - Port: 20000 + gpu_id (e.g., GPU 0 → 20000, GPU 1 → 20001)
+    // - Payload: All channel handles for that GPU (e.g., 8 handles)
+    //
+    // Alternative (not used): One bootstrap per channel would require 64 connections
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
 
+      // Create bootstrap server socket and wait for client
       int bootstrap_fd = -1;
       if (bootstrap_server_create(ctx.bootstrap_port, &bootstrap_fd) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": bootstrap_server_create failed" << std::endl;
         return 1;
       }
 
-      // Reuse cached handles (no duplicate listen)
+      // Send cached handles to client
+      // CRITICAL: Use ctx.handles (cached from Step 1), not a new listen call
       if (bootstrap_server_send_handles(bootstrap_fd, ctx.handles) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": bootstrap_server_send_handles failed" << std::endl;
         close(bootstrap_fd);
@@ -203,125 +450,201 @@ int main(int argc, char** argv) {
       std::cout << "[GPU " << gpu_id << "] Sent " << ctx.handles.size() << " handles" << std::endl;
     }
     
+    // ========================================
+    // Step 3: Accept Connections
+    // ========================================
+
     std::cout << "\n[SERVER] Step 3: Accepting connections..." << std::endl;
-    
-    // Accept all connections
+
+    // Now that client has the handles, it will connect to each channel
+    // We need to accept those connections
+    // ChannelManager.server_accept_all() handles retry logic internally
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
-      
+
+      // Accept all channel connections for this GPU
+      // This creates recv_comm for each channel
       if (ctx.mgr->server_accept_all() != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": server_accept_all failed" << std::endl;
         return 1;
       }
-      
+
       std::cout << "[GPU " << gpu_id << "] Accepted " << ctx.mgr->get_num_channels() << " connections" << std::endl;
     }
-    
+
+    // ========================================
+    // Step 4: Register Memory
+    // ========================================
+
     std::cout << "\n[SERVER] Step 4: Registering memory..." << std::endl;
-    
-    // Register memory on all GPUs
+
+    // Register GPU buffers with TCPX for RDMA (zero-copy transfers)
+    // This calls tcpx_reg_mr() for each channel
+    // The registered memory can then be used for irecv operations
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
-      
+
+      // Set CUDA context for this GPU (required for memory operations)
       if (!cuda_check(cuCtxSetCurrent(ctx.cuCtx), "cuCtxSetCurrent")) {
         return 1;
       }
-      
+
+      // Register memory for receiving
+      // is_send=true means this is the receiving side
       if (ctx.mgr->register_memory(ctx.gpu_buf, kRegisteredBytes, NCCL_PTR_CUDA, true) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": register_memory failed" << std::endl;
         return 1;
       }
-      
+
       std::cout << "[GPU " << gpu_id << "] Registered memory on " << ctx.mgr->get_num_channels() << " channels" << std::endl;
     }
-    
+
+    // ========================================
+    // Server Ready
+    // ========================================
+
     std::cout << "\n=== ALL GPUs READY (SERVER) ===" << std::endl;
     std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
     std::cout << "Architecture: Single process, all NICs shared" << std::endl;
-    
+
+    // TODO (Step 3): Add actual data receive and performance measurement here
+
+    // ========================================
     // Cleanup
+    // ========================================
+
     for (auto& ctx : gpus) {
       ctx.mgr->deregister_memory(true);
       ctx.mgr->close_all(true);
     }
     
   } else {
-    // ===== CLIENT: Manage all 8 GPUs =====
-    
+    // ========================================================================
+    // CLIENT FLOW
+    // ========================================================================
+
+    // The client flow has 3 main steps:
+    // 1. Bootstrap handshake (receive channel handles from server)
+    // 2. Connect to server channels
+    // 3. Register memory (prepare GPU buffers for RDMA)
+
+    // ========================================
+    // Step 1: Bootstrap Handshake
+    // ========================================
+
     std::cout << "[CLIENT] Step 1: Bootstrap handshake..." << std::endl;
-    
-    // Bootstrap: receive handles from server
+
+    // Connect to server's bootstrap sockets and receive channel handles
+    // One connection per GPU (ports 20000-20007)
+    // Each connection receives all channel handles for that GPU
+
     std::vector<std::vector<ncclNetHandle_v7>> all_handles(kNumGPUs);
-    
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
-      
+
+      // Connect to server's bootstrap socket
       int bootstrap_fd = -1;
       if (bootstrap_client_connect(server_ip, ctx.bootstrap_port, &bootstrap_fd) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": bootstrap_client_connect failed" << std::endl;
         return 1;
       }
-      
+
+      // Receive all channel handles for this GPU
       if (bootstrap_client_recv_handles(bootstrap_fd, all_handles[gpu_id]) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": bootstrap_client_recv_handles failed" << std::endl;
         close(bootstrap_fd);
         return 1;
       }
-      
+
       close(bootstrap_fd);
       std::cout << "[GPU " << gpu_id << "] Received " << all_handles[gpu_id].size() << " handles" << std::endl;
     }
     
+    // ========================================
+    // Step 2: Connect to Server
+    // ========================================
+
     std::cout << "\n[CLIENT] Step 2: Connecting to server..." << std::endl;
-    
-    // Connect all GPUs
+
+    // Use the received handles to connect to server's channels
+    // ChannelManager.client_connect_all() calls tcpx_connect_v5() for each channel
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
-      
+
+      // Connect all channels for this GPU
+      // This creates send_comm for each channel
       if (ctx.mgr->client_connect_all(all_handles[gpu_id]) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": client_connect_all failed" << std::endl;
         return 1;
       }
-      
+
       std::cout << "[GPU " << gpu_id << "] Connected " << ctx.mgr->get_num_channels() << " channels" << std::endl;
     }
-    
+
+    // ========================================
+    // Step 3: Register Memory
+    // ========================================
+
     std::cout << "\n[CLIENT] Step 3: Registering memory..." << std::endl;
-    
-    // Register memory on all GPUs
+
+    // Register GPU buffers with TCPX for RDMA
+    // This calls tcpx_reg_mr() for each channel
+    // The registered memory can then be used for isend operations
+
     for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
       GPUContext& ctx = gpus[gpu_id];
-      
+
+      // Set CUDA context for this GPU
       if (!cuda_check(cuCtxSetCurrent(ctx.cuCtx), "cuCtxSetCurrent")) {
         return 1;
       }
-      
+
+      // Register memory for sending
+      // is_send=false means this is the sending side
       if (ctx.mgr->register_memory(ctx.gpu_buf, kRegisteredBytes, NCCL_PTR_CUDA, false) != 0) {
         std::cerr << "[ERROR] GPU " << gpu_id << ": register_memory failed" << std::endl;
         return 1;
       }
-      
+
       std::cout << "[GPU " << gpu_id << "] Registered memory on " << ctx.mgr->get_num_channels() << " channels" << std::endl;
     }
-    
+
+    // ========================================
+    // Client Ready
+    // ========================================
+
     std::cout << "\n=== ALL GPUs READY (CLIENT) ===" << std::endl;
     std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
     std::cout << "Architecture: Single process, all NICs shared" << std::endl;
-    
-    // Wait for server
-    std::cout << "\n[CLIENT] Waiting 5 seconds for server..." << std::endl;
-    sleep(5);
-    
+
+    // TODO (Step 3): Add actual data send and performance measurement here
+
+    // Wait for server to complete (so it can accept all 64 connections and register memory)
+    // Server needs time to sequentially accept 8 GPUs × 8 channels = 64 connections
+    std::cout << "\n[CLIENT] Waiting 30 seconds for server to accept all connections..." << std::endl;
+    sleep(30);
+
+    // ========================================
     // Cleanup
+    // ========================================
+
     for (auto& ctx : gpus) {
       ctx.mgr->deregister_memory(false);
       ctx.mgr->close_all(false);
     }
   }
-  
+
+  // ========================================
+  // Test Complete
+  // ========================================
+
   std::cout << "\n[INFO] Test completed successfully" << std::endl;
-  std::cout << "Next: Add actual data transfer and performance measurement" << std::endl;
-  
+  std::cout << "Next: Add actual data transfer and performance measurement (Step 3)" << std::endl;
+
   return 0;
 }
 

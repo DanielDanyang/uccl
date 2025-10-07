@@ -386,33 +386,36 @@ int ChannelManager::server_listen_all(std::vector<ncclNetHandle_v7>& handles) {
 int ChannelManager::server_accept_all() {
   constexpr int kMaxRetries = 100;
   constexpr int kRetryDelayMs = 100;
-  
+
   for (int i = 0; i < num_channels_; i++) {
     ChannelResources& ch = channels_[i];
-    
-    std::cout << "[ChannelManager] Channel " << ch.channel_id 
+
+    std::cout << "[ChannelManager] Channel " << ch.channel_id
               << ": Accepting connection..." << std::endl;
-    
+
     // Retry accept (client may not have connected yet)
     bool accepted = false;
     for (int attempt = 0; attempt < kMaxRetries; attempt++) {
       int rc = tcpx_accept_v5(ch.listen_comm, &ch.recv_comm, &ch.recv_dev_handle);
-      
-      if (rc != 0) {
-        std::cerr << "[ChannelManager] tcpx_accept_v5 failed for channel " 
-                  << ch.channel_id << ", rc=" << rc << std::endl;
-        return -1;
-      }
-      
-      if (ch.recv_comm) {
-        std::cout << "[ChannelManager] Channel " << ch.channel_id 
+
+      // Success: recv_comm is set
+      if (rc == 0 && ch.recv_comm) {
+        std::cout << "[ChannelManager] Channel " << ch.channel_id
                   << ": Connection accepted, recv_comm=" << ch.recv_comm << std::endl;
         accepted = true;
         break;
       }
-      
-      // Client hasn't connected yet, retry
-      std::this_thread::sleep_for(std::chrono::milliseconds(kRetryDelayMs));
+
+      // Transient error or not ready yet: retry
+      // rc=2 typically means "not ready" or "would block"
+      if (rc != 0 || !ch.recv_comm) {
+        if (attempt == 0) {
+          std::cout << "[ChannelManager] Channel " << ch.channel_id
+                    << ": Accept not ready (rc=" << rc << "), retrying..." << std::endl;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kRetryDelayMs));
+        continue;
+      }
     }
     
     if (!accepted) {
