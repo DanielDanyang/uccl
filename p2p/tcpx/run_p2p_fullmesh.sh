@@ -48,10 +48,11 @@ BOOTSTRAP_BASE=${UCCL_TCPX_BOOTSTRAP_PORT_BASE:-20000}
 PERF_SIZE=${UCCL_TCPX_PERF_SIZE:-67108864}
 PERF_ITERS=${UCCL_TCPX_PERF_ITERS:-20}
 CHUNK_BYTES=${UCCL_TCPX_CHUNK_BYTES:-524288}
+CHANNELS=${UCCL_TCPX_NUM_CHANNELS:-1}  # Single channel per GPU (working config)
 LOG_DIR=${LOG_DIR:-"$(dirname "$0")/logs"}
 mkdir -p "${LOG_DIR}"
 
-map_gpu_to_iface() {
+map_gpu_to_ifaces() {
   local gpu=$1
   case ${gpu} in
     0|1) echo "eth1" ;;
@@ -101,7 +102,7 @@ run_instance() {
     export NCCL_GPUDIRECTTCPX_SOCKET_IFNAME="${iface}"
     export NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX="/run/tcpx"
     export UCCL_TCPX_BOOTSTRAP_PORT_BASE="${BOOTSTRAP_BASE}"
-    export UCCL_TCPX_NUM_CHANNELS=1
+    export UCCL_TCPX_NUM_CHANNELS="${CHANNELS}"
     export UCCL_TCPX_PERF_SIZE="${PERF_SIZE}"
     export UCCL_TCPX_PERF_ITERS="${PERF_ITERS}"
     export UCCL_TCPX_CHUNK_BYTES="${CHUNK_BYTES}"
@@ -115,13 +116,13 @@ run_instance() {
 }
 
 for gpu in ${GPU_LIST}; do
-  iface=$(map_gpu_to_iface "${gpu}")
-  if [[ -z "${iface}" ]]; then
+  ifaces=$(map_gpu_to_ifaces "${gpu}")
+  if [[ -z "${ifaces}" ]]; then
     echo "[WARN] No NIC mapping for GPU ${gpu}; skipping" >&2
     continue
   fi
-  echo "[INFO] Launching ${ROLE} GPU ${gpu} on ${iface} (port base ${BOOTSTRAP_BASE})"
-  run_instance "${ROLE}" "${gpu}" "${iface}"
+  echo "[INFO] Launching ${ROLE} GPU ${gpu} on ${ifaces} (${CHANNELS} channels, port base ${BOOTSTRAP_BASE})"
+  run_instance "${ROLE}" "${gpu}" "${ifaces}"
   sleep 0.2
 done
 

@@ -1,0 +1,156 @@
+=== eth1 ===
+Driver info:
+driver: gve
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:06:00.0
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: yes
+
+PCI and NUMA:
+  PCI: 0000:06:00.0
+  NUMA: 0
+
+Statistics (selected):
+     rx_packets: 33053331
+     rx_packets_sph: 33052500
+     rx_packets_hbo: 0
+     rx_devmem_pkts: 32229881
+     rx_devmem_dropped: 0
+     tx_packets: 5852179
+     rx_bytes: 265996882302
+     tx_bytes: 256121048814
+     rx_bytes[0]: 11504870
+     rx_bytes[1]: 13373394
+     rx_bytes[2]: 5058164
+     rx_bytes[3]: 3233532
+     rx_bytes[4]: 4373076
+     rx_bytes[5]: 3327434
+     rx_bytes[6]: 15046314
+     rx_bytes[7]: 8635996
+     rx_bytes[8]: 65466473348
+     rx_bytes[9]: 65478925734
+     rx_bytes[10]: 65452762806
+     rx_bytes[11]: 65466369066
+
+=== eth2 ===
+Driver info:
+driver: gve
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:0c:00.0
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: yes
+
+PCI and NUMA:
+  PCI: 0000:0c:00.0
+  NUMA: 0
+
+Statistics (selected):
+     rx_packets: 33076642
+     rx_packets_sph: 33075811
+     rx_packets_hbo: 0
+     rx_devmem_pkts: 32209057
+     rx_devmem_dropped: 0
+     tx_packets: 5853426
+     rx_bytes: 265947556904
+     tx_bytes: 256071139164
+     rx_bytes[0]: 15007496
+     rx_bytes[1]: 3112910
+     rx_bytes[2]: 5840266
+     rx_bytes[3]: 4482004
+     rx_bytes[4]: 14390522
+     rx_bytes[5]: 3156264
+     rx_bytes[6]: 3127994
+     rx_bytes[7]: 18315670
+     rx_bytes[8]: 65453302138
+     rx_bytes[9]: 65459661608
+     rx_bytes[10]: 65453244200
+     rx_bytes[11]: 65447008732
+
+=== eth3 ===
+Driver info:
+driver: gve
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:86:00.0
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: yes
+
+PCI and NUMA:
+  PCI: 0000:86:00.0
+  NUMA: 1
+
+Statistics (selected):
+     rx_packets: 33059877
+     rx_packets_sph: 33059046
+     rx_packets_hbo: 0
+     rx_devmem_pkts: 32202822
+     rx_devmem_dropped: 0
+     tx_packets: 5824399
+     rx_bytes: 265920907698
+     tx_bytes: 256044167578
+     rx_bytes[0]: 7306340
+     rx_bytes[1]: 10338318
+     rx_bytes[2]: 4227410
+     rx_bytes[3]: 8587212
+     rx_bytes[4]: 8283980
+     rx_bytes[5]: 12214812
+     rx_bytes[6]: 10381720
+     rx_bytes[7]: 5857046
+     rx_bytes[8]: 65447404918
+     rx_bytes[9]: 65450060402
+     rx_bytes[10]: 65446876340
+     rx_bytes[11]: 65444220922
+
+=== eth4 ===
+Driver info:
+driver: gve
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:8c:00.0
+supports-statistics: yes
+supports-test: no
+supports-eeprom-access: no
+supports-register-dump: no
+supports-priv-flags: yes
+
+PCI and NUMA:
+  PCI: 0000:8c:00.0
+  NUMA: 1
+
+Statistics (selected):
+     rx_packets: 33099149
+     rx_packets_sph: 33098318
+     rx_packets_hbo: 0
+     rx_devmem_pkts: 32202891
+     rx_devmem_dropped: 0
+     tx_packets: 5772046
+     rx_bytes: 265923589834
+     tx_bytes: 256040799140
+     rx_bytes[0]: 9645538
+     rx_bytes[1]: 15315882
+     rx_bytes[2]: 6545252
+     rx_bytes[3]: 3711174
+     rx_bytes[4]: 13731536
+     rx_bytes[5]: 12267778
+     rx_bytes[6]: 1013946
+     rx_bytes[7]: 7094450
+     rx_bytes[8]: 65446810210
+     rx_bytes[9]: 65449977888
+     rx_bytes[10]: 65446876340
+     rx_bytes[11]: 65443692476
+

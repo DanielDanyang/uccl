@@ -11,10 +11,14 @@
 #include <iostream>
 #include <cstring>
 #include <cstdio>
+#include <fstream>
+#include <cctype>
+#include <cctype>
 #include <sstream>
 #include <thread>
 #include <vector>
 #include <chrono>
+#include <fstream>
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 
@@ -25,6 +29,13 @@ std::string trim(const std::string& s) {
   if (start == std::string::npos) return "";
   size_t end = s.find_last_not_of(" \t\n\r");
   return s.substr(start, end - start + 1);
+}
+
+std::string to_lower_copy(std::string v) {
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return v;
 }
 
 bool read_gpu_pci_bdf(int gpu_id, std::string& bdf_out) {
@@ -84,9 +95,29 @@ std::string canonical_path(const std::string& path) {
   if (path.empty()) return path;
   std::error_code ec;
   auto p = std::filesystem::path(path);
-  auto canonical = std::filesystem::canonical(p, ec);
+  auto canonical = std::filesystem::weakly_canonical(p, ec);
   if (ec) return path;
   return canonical.string();
+}
+
+int read_numa_node_from_path(const std::string& sysfs_path) {
+  if (sysfs_path.empty()) return -1;
+  std::error_code ec;
+  std::filesystem::path p(sysfs_path);
+  if (!std::filesystem::exists(p, ec)) return -1;
+  std::filesystem::path numa_file = p / "numa_node";
+  if (!std::filesystem::exists(numa_file, ec)) return -1;
+  std::ifstream f(numa_file);
+  if (!f) return -1;
+  int node = -1;
+  f >> node;
+  return node;
+}
+
+int read_numa_node_from_bdf(const std::string& bdf) {
+  if (bdf.empty()) return -1;
+  std::string lower_bdf = to_lower_copy(bdf);
+  return read_numa_node_from_path("/sys/bus/pci/devices/" + lower_bdf);
 }
 
 std::vector<std::string> extract_pci_segments(const std::string& path) {
@@ -133,19 +164,27 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
   }
 
   if (num_channels_ > tcpx_dev_count) {
-    std::cerr << "[ChannelManager] Warning: Requested " << num_channels_
+    std::cerr << "[ChannelManager] Info: Requested " << num_channels_
               << " channels but only " << tcpx_dev_count
-              << " TCPX devices available. Clamping to " << tcpx_dev_count << std::endl;
-    num_channels_ = tcpx_dev_count;
+              << " TCPX devices are present. Reusing NICs to satisfy the request." << std::endl;
   }
 
   std::string gpu_bdf;
   std::vector<std::string> gpu_pci_segments;
+  int gpu_numa = -1;
   if (read_gpu_pci_bdf(gpu_id_, gpu_bdf)) {
     std::string gpu_sysfs = canonical_path("/sys/bus/pci/devices/" + gpu_bdf);
     gpu_pci_segments = extract_pci_segments(gpu_sysfs);
     std::cout << "[ChannelManager] GPU " << gpu_id_ << " PCI BDF " << gpu_bdf
               << " (" << gpu_sysfs << ")" << std::endl;
+    gpu_numa = read_numa_node_from_path(gpu_sysfs);
+    if (gpu_numa < 0) {
+      gpu_numa = read_numa_node_from_bdf(gpu_bdf);
+    }
+    if (gpu_numa >= 0) {
+      std::cout << "[ChannelManager] GPU " << gpu_id_ << " NUMA node "
+                << gpu_numa << std::endl;
+    }
   } else {
     std::cerr << "[ChannelManager] Warning: Unable to determine PCI path for GPU "
               << gpu_id_ << ". Falling back to naive NIC ordering." << std::endl;
@@ -157,6 +196,8 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
     std::vector<std::string> pci_segments;
     int score = -1000;
     bool cuda_supported = false;
+    int numa_node = -1;
+    bool numa_match = false;
   };
 
   std::vector<Candidate> candidates;
@@ -174,6 +215,18 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
       nic_path = canonical_path(nic_path);
       cand.pci_segments = extract_pci_segments(nic_path);
       cand.score = compute_pci_score(gpu_pci_segments, cand.pci_segments);
+      cand.numa_node = read_numa_node_from_path(nic_path);
+    }
+    if (cand.numa_node < 0 && props.pci_path) {
+      cand.numa_node = read_numa_node_from_path(props.pci_path);
+    }
+    if (cand.numa_node < 0 && props.pci_path) {
+      std::filesystem::path nic_fs(props.pci_path);
+      std::string nic_bdf = nic_fs.filename().string();
+      cand.numa_node = read_numa_node_from_bdf(nic_bdf);
+    }
+    if (gpu_numa >= 0 && cand.numa_node >= 0 && cand.numa_node == gpu_numa) {
+      cand.numa_match = true;
     }
     candidates.push_back(cand);
   }
@@ -211,10 +264,17 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
   }
 
   if ((int)selected.size() < num_channels_) {
-    std::cerr << "[ChannelManager] Warning: Requested " << num_channels_
-              << " channel(s) but only " << selected.size()
-              << " NIC(s) match GPU " << gpu_id_ << " topology. Reducing channel count." << std::endl;
-    num_channels_ = selected.size();
+    // Replicate the best NICs to satisfy the requested channel count. NCCL also
+    // opens multiple connections per NIC to increase pipeline depth.
+    size_t base = selected.size();
+    if (base == 0) {
+      selected.push_back(sorted.front());
+      base = 1;
+    }
+    while ((int)selected.size() < num_channels_) {
+      const Candidate& src = selected[selected.size() % base];
+      selected.push_back(src);
+    }
   }
 
   channels_.resize(num_channels_);
@@ -230,7 +290,14 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
     const char* nic_pci = cand.props.pci_path ? cand.props.pci_path : "";
     std::cout << "[ChannelManager] Channel " << i << " → netDev " << cand.dev
               << " (" << nic_name << ", PCI=" << nic_pci
-              << ", score=" << cand.score << ")" << std::endl;
+              << ", score=" << cand.score;
+    if (cand.numa_node >= 0) {
+      std::cout << ", numa=" << cand.numa_node;
+    }
+    if (cand.numa_match) {
+      std::cout << ", numa-match";
+    }
+    std::cout << ")" << std::endl;
 
     ch.listen_comm = nullptr;
     ch.recv_comm = nullptr;

@@ -1,270 +1,284 @@
 # AI Assistant Handoff Prompt
 
-**Purpose**: This prompt allows a new AI assistant (without conversation history) to immediately continue debugging the eth2 "rx no cmsg" issue.
+**Last Updated**: 2025-10-07  
+**Status**: IRQ investigation complete, single-process refactor planned  
+**Purpose**: Quick context injection for new AI assistants
 
 ---
 
-## Context Injection Prompt
-
-Copy and paste this entire section to a new AI assistant:
+## Context Injection (Copy This)
 
 ```
-I'm working on a NIXL-TCPX plugin for GCP A3-high instances (2 nodes, 8x H100 GPUs per node, 4x gVNIC per node). The project uses Google's nccl-plugin-gpudirecttcpx APIs to implement GPU-to-GPU P2P communication over TCPX (GPUDirect over TCP with devmem-tcp kernel API).
+I'm working on a NIXL-TCPX plugin for GCP A3-high instances (2 nodes, 8× H100 GPUs, 4× gVNIC per node). 
+The project uses Google's nccl-plugin-gpudirecttcpx APIs for GPU-to-GPU P2P over TCPX (GPUDirect over TCP).
 
-CRITICAL ISSUE: The P2P benchmark works perfectly on eth1 but fails on eth2 with "rx no cmsg" error, even though NCCL AllReduce tests successfully use BOTH eth1 and eth2 with GPUDirect TCPX devmem (proven by ethtool showing millions of rx_devmem_pkts on both NICs).
+CURRENT STATUS (2025-10-07):
+- Single-NIC P2P: WORKING (2.75 GB/s server, 1.17 GB/s client per GPU)
+- NCCL Reference: WORKING (19.176 GB/s bus bandwidth)
+- IRQ Investigation: COMPLETE - IRQ affinity NOT the bottleneck
+- Next: Single-process architecture refactor to enable multi-NIC
 
-KEY FACTS:
-1. Environment is VERIFIED WORKING - NCCL uses eth2 successfully with devmem
-2. Hardware topology is correct: eth1/eth2 on NUMA0 for GPU0-3, eth3/eth4 on NUMA1 for GPU4-7
-3. Same TCPX plugin version (3.1.6._2023_09_27) used by both NCCL and P2P bench
-4. eth1-only P2P test: WORKS (rx_devmem_pkts increases)
-5. eth2-only P2P test: FAILS with "rx no cmsg" (rx_devmem_pkts stays 0)
-6. eth2 with host-recv mode: WORKS (bypasses devmem/cmsg)
-7. Plugin loading path, flow steering config, and buffer types all verified correct
+KEY FINDINGS:
+1. ✅ IRQ affinity is NOT the bottleneck (NCCL uses default IRQ distribution)
+2. ✅ Thread CPU affinity IS important (NCCL pins to NUMA-local cores)
+3. ✅ Multi-NIC parallelism IS critical (NCCL uses 4 NICs, P2P uses 1)
+4. ✅ Process architecture matters (NCCL: 1 proc/8 GPUs, P2P: 8 procs/1 GPU)
+5. ❌ Multi-NIC per GPU fails in current architecture (devmem conflicts)
 
-HYPOTHESIS: The issue is in how our P2P benchmark code interacts with the TCPX plugin for eth2, NOT an environmental/system issue. There's a code path difference between eth1 and eth2 in our implementation or plugin interaction.
+ROOT CAUSE: Performance gap (~7x) due to process architecture, not IRQ affinity.
+- NCCL: 1 process/node → can share NICs across GPUs → multi-NIC per GPU works
+- P2P: 8 processes/node → cannot share NICs → devmem conflicts
 
 WORKSPACE: /home/daniel/uccl
+
+KEY DOCS (read in order):
+1. p2p/tcpx/docs/PROJECT_STATUS.md - Current status and timeline
+2. p2p/tcpx/docs/DIAGNOSTICS_SUMMARY.md - IRQ investigation results
+3. p2p/tcpx/docs/SINGLE_PROCESS_PLAN.md - Refactor plan
+4. p2p/tcpx/README.md - Quick start
+
 KEY FILES:
-- Debug report: p2p/tcpx/docs/DEBUG_ETH2_RX_NO_CMSG.md (READ THIS FIRST)
-- P2P benchmark: p2p/tcpx/bench_p2p.sh
-- Test program: p2p/tcpx/tests/test_tcpx_perf.cc
-- TCPX wrapper: p2p/tcpx/tcpx_impl.cc
-- Working NCCL reference: collective/rdma/run_nccl_test_tcpx.sh
+- p2p/tcpx/run_p2p_fullmesh.sh - Current P2P launcher (8 processes)
+- p2p/tcpx/tests/test_tcpx_perf_multi.cc - P2P benchmark program
+- p2p/tcpx/src/channel_manager.cc - Channel management
+- collective/rdma/run_nccl_test_tcpx.sh - NCCL reference
 
-IMMEDIATE TASK: Read the debug report, then help me identify why eth2 doesn't trigger the devmem/cmsg path in our P2P code when eth1 does, given that both NICs work perfectly in NCCL tests.
+IMMEDIATE TASK:
+Implement single-process architecture refactor (see SINGLE_PROCESS_PLAN.md)
+- Goal: Enable multi-NIC per GPU (no devmem conflicts)
+- Timeline: ~5-7 days
+- Target: >15 GB/s bus bandwidth
 
-START BY: Reading p2p/tcpx/docs/DEBUG_ETH2_RX_NO_CMSG.md for full context.
+START BY: Reading p2p/tcpx/docs/PROJECT_STATUS.md and SINGLE_PROCESS_PLAN.md
 ```
 
 ---
 
-## Quick Start Commands for New AI
+## Quick Start for New AI
 
-After injecting the context above, the AI can immediately run:
+### 1. Read Core Documentation
+```bash
+# Project status
+view p2p/tcpx/docs/PROJECT_STATUS.md
 
-### 1. Read the full debug report
-```
-view p2p/tcpx/docs/DEBUG_ETH2_RX_NO_CMSG.md
-```
+# IRQ investigation results
+view p2p/tcpx/docs/DIAGNOSTICS_SUMMARY.md
 
-### 2. Examine the P2P test code
-```
-view p2p/tcpx/tests/test_tcpx_perf.cc
-view p2p/tcpx/tcpx_impl.cc
-```
-
-### 3. Compare with working NCCL script
-```
-view collective/rdma/run_nccl_test_tcpx.sh
+# Refactor plan
+view p2p/tcpx/docs/SINGLE_PROCESS_PLAN.md
 ```
 
-### 4. Check recent logs
-```
-view p2p/tcpx/logs/bench_server_*.log
-view p2p/tcpx/logs/bench_client_*.log
+### 2. Verify Current P2P Works
+```bash
+cd /home/daniel/uccl/p2p/tcpx
+
+# Node 0 (Server)
+./run_p2p_fullmesh.sh server
+
+# Node 1 (Client)
+./run_p2p_fullmesh.sh client <NODE0_IP>
+
+# Check results
+grep "PERF.*Avg.*BW:" logs/fullmesh_*.log
+# Expected: ~2.75 GB/s (server), ~1.17 GB/s (client)
 ```
 
-### 5. Search for relevant code patterns
+### 3. Review NCCL Reference
+```bash
+cd /home/daniel/uccl/collective/rdma
+
+# Run NCCL test
+./run_nccl_test_tcpx.sh nccl 2 8 0 1 1
+
+# Check results
+cat diagnostics/nccl_*/nccl_metrics_summary.txt
+# Expected: ~19 GB/s bus bandwidth
 ```
-grep-search --query "ncclNetListen|ncclNetAccept|ncclNetRegMr" --directory /home/daniel/uccl/p2p/tcpx
+
+### 4. Start Refactor (Step 1)
+```bash
+cd /home/daniel/uccl/p2p/tcpx
+
+# Read the plan
+view docs/SINGLE_PROCESS_PLAN.md
+
+# Create prototype launcher
+cp run_p2p_fullmesh.sh run_p2p_singleproc.sh
+vim run_p2p_singleproc.sh  # Remove per-GPU forking
+
+# Create orchestrator skeleton
+cp tests/test_tcpx_perf_multi.cc tests/test_tcpx_perf_orchestrator.cc
+vim tests/test_tcpx_perf_orchestrator.cc  # Add multi-threaded worker model
 ```
 
 ---
 
 ## Expected AI Workflow
 
-1. **Read DEBUG_ETH2_RX_NO_CMSG.md** - Get full context
-2. **Analyze code paths** - Compare eth1 vs eth2 execution through tcpx_impl.cc
-3. **Instrument code** - Add debug logging to trace plugin API calls
-4. **Run controlled experiments** - eth1 vs eth2 with verbose logging
-5. **Identify divergence point** - Find where eth2 path differs from eth1
-6. **Propose fix** - Based on root cause analysis
+1. **Understand Context** (30 min)
+   - Read PROJECT_STATUS.md
+   - Read DIAGNOSTICS_SUMMARY.md
+   - Read SINGLE_PROCESS_PLAN.md
 
----
+2. **Verify Environment** (15 min)
+   - Run current P2P benchmark
+   - Confirm 2.75 GB/s baseline
 
-## Key Debugging Principles
+3. **Plan Implementation** (1 hour)
+   - Review SINGLE_PROCESS_PLAN.md steps
+   - Ask clarifying questions if needed
+   - Confirm approach with user
 
-- **ethtool rx_devmem_pkts is ground truth**: If it's 0, devmem path isn't active
-- **NCCL proves environment works**: Don't waste time on system-level debugging
-- **Plugin is black box**: Debug by observing API call patterns, not internals
-- **Compare working vs broken**: eth1 (works) vs eth2 (fails) in same codebase
-- **Verify assumptions**: Check device index mapping, NIC name parsing, etc.
+4. **Implement Step-by-Step** (5-7 days)
+   - Follow SINGLE_PROCESS_PLAN.md timeline
+   - Test after each step
+   - Document progress
+
+5. **Validate and Measure** (2-3 days)
+   - Run validation tests (Step 6 in plan)
+   - Compare to NCCL baseline
+   - Document results
 
 ---
 
 ## Common Pitfalls to Avoid
 
-❌ **Don't** assume it's a kernel/driver/dp-manager issue (NCCL proves otherwise)  
-❌ **Don't** try to modify TCPX plugin (we don't have source, treat as black box)  
-❌ **Don't** focus on flow steering implementation (it's external, we just configure it)  
-❌ **Don't** ignore ethtool counters (they're authoritative)  
-
-✅ **Do** compare eth1 vs eth2 code paths in our wrapper  
-✅ **Do** add verbose logging to trace plugin API calls  
-✅ **Do** verify device index and NIC name mapping  
-✅ **Do** check initialization order and timing  
+1. **Don't tune IRQ affinity** - NCCL doesn't use it, not necessary
+2. **Don't try multi-NIC with current architecture** - Known to fail (devmem conflicts)
+3. **Don't increase channels on single NIC** - Known to degrade performance
+4. **Don't test on loopback** - TCPX devmem requires separate nodes
+5. **Don't skip validation steps** - Each step builds on previous
 
 ---
 
 ## Success Criteria
 
-The issue is resolved when:
-1. `./bench_p2p.sh server 0 --ifaces=eth2` completes without "rx no cmsg" error
-2. `ethtool -S eth2` shows `rx_devmem_pkts` increasing during eth2 P2P test
-3. Both eth1 and eth2 work identically in P2P benchmark (matching NCCL behavior)
+### Functional
+- [ ] Single-process P2P works (1 GPU smoke test)
+- [ ] No devmem conflicts (8 GPUs, multi-NIC)
+- [ ] Multi-NIC works (4 NICs simultaneously)
+- [ ] Multi-channel works (8 channels/GPU)
+
+### Performance
+- [ ] Bandwidth >10 GB/s/GPU (4 NICs × multi-channel)
+- [ ] Bandwidth >15 GB/s bus BW (target)
+- [ ] Within 20% of NCCL (19.176 GB/s)
+
+### Quality
+- [ ] Stable and reproducible
+- [ ] Thread affinity verified
+- [ ] Well-documented
+- [ ] Fallback to multi-process works
 
 ---
 
-## Additional Context
+## Key Technical Concepts
 
-### Project Background
-- **Goal**: Implement NIXL-TCPX plugin using Google's nccl-plugin-gpudirecttcpx APIs
-- **Partners**: Anyscale, Character AI
-- **Environment**: GCP A3-high (H100), TCPX-only (no RDMA)
-- **Constraint**: Treat net_tcpx.h as black box, use send/recv APIs directly
+**TCPX**: GPUDirect over TCP using devmem-tcp kernel API (zero-copy GPU-to-GPU)
 
-### Technical Details
-- **GPUDirect TCPX**: Zero-copy GPU-to-GPU over TCP via devmem-tcp kernel API
-- **devmem-tcp**: Kernel provides cmsg with scattered buffer descriptors for DMA
-- **Unpack kernel**: CUDA kernel copies scattered devmem buffers to contiguous GPU memory
-- **Flow steering**: UNIX socket-based traffic steering via dp-manager (external service)
+**devmem-tcp**: Kernel API providing cmsg with scattered buffer descriptors for DMA
 
-### Network Topology
-- **Node 0**: eth0 (ctrl), eth1/eth2 (NUMA0/GPU0-3), eth3/eth4 (NUMA1/GPU4-7)
-- **Node 1**: Same layout
-- **IPs**: See scripts/node_ips/tcpx.txt
+**Unpack kernel**: CUDA kernel copying scattered devmem buffers to contiguous GPU memory
+
+**Flow steering**: Traffic steering via dp-manager (external UNIX socket service)
+
+**Process architecture**:
+- **Single-process** (NCCL): 1 proc/node, all GPUs/NICs visible, enables NIC sharing
+- **Multi-process** (P2P): 8 procs/node, 1 GPU each, devmem conflicts when sharing NICs
+
+**NUMA topology**:
+- NUMA 0: GPUs 0-3, eth1-2, CPUs 0-51, 104-155
+- NUMA 1: GPUs 4-7, eth3-4, CPUs 52-103, 156-207
+
+**Thread affinity**: Pinning threads to NUMA-local cores (important for performance)
+
+**IRQ affinity**: Pinning interrupt handlers to specific CPUs (NOT important - NCCL uses default)
 
 ---
 
-## Reproduction Commands
+## Environment Details
 
-### Failing Case (eth2)
+**Hardware**:
+- 2 nodes, 8× H100 GPUs per node
+- 4× gVNIC per node (eth1-4, 200 Gbps each)
+- 208 CPUs per node (104 cores × 2 HT)
+
+**Software**:
+- Ubuntu with custom kernel (devmem-tcp support)
+- TCPX plugin v3.1.6
+- NCCL 2.x with TCPX support
+- dp-manager for flow steering
+
+**Network Config**:
+- Node IPs: `scripts/node_ips/tcpx.txt`
+- Bootstrap port: 20000 (base)
+- NICs: eth1-4 (200 Gbps each)
+
+---
+
+## Useful Commands
+
+### Check NIC Status
 ```bash
-# Terminal 1 (Node 0):
-cd /mnt/user_storage/uccl/p2p/tcpx
-./bench_p2p.sh server 0 --ifaces=eth2 --iters=10 --size=67108864
+# Verify devmem is working
+ethtool -S eth1 | grep rx_devmem_pkts  # Should increase during test
 
-# Terminal 2 (Node 1):
-./bench_p2p.sh client <NODE0_ETH0_IP> 0 --ifaces=eth2 --iters=10 --size=67108864
-
-# Terminal 3 (Either node):
-watch -n 0.5 'ethtool -S eth2 | grep rx_devmem_pkts'
-# Observe: stays at 0 (WRONG)
+# Check NIC info
+ip addr show eth1
 ```
 
-### Working Case (eth1)
+### Check CPU/IRQ
 ```bash
-# Same commands but --ifaces=eth1
-# Observe: rx_devmem_pkts increases (CORRECT)
+# CPU topology
+lscpu
+
+# IRQ affinity
+cat /proc/irq/*/smp_affinity_list | head -20
+
+# CPU usage
+mpstat -P ALL 1
 ```
 
-### Working NCCL Reference (eth2)
+### Build and Test
 ```bash
-cd /mnt/user_storage/uccl/collective/rdma
-./run_nccl_test_tcpx.sh
-# Uses both eth1 and eth2 successfully
-# Observe: rx_devmem_pkts increases on BOTH NICs
+# Build
+cd /home/daniel/uccl/p2p/tcpx
+make clean && make
+
+# Run test
+./run_p2p_fullmesh.sh server  # Node 0
+./run_p2p_fullmesh.sh client <NODE0_IP>  # Node 1
+
+# Check logs
+grep "PERF.*Avg.*BW:" logs/fullmesh_*.log
 ```
 
 ---
 
-## File Structure Reference
+## Documentation Structure
 
 ```
-/home/daniel/uccl/
-├── p2p/tcpx/
-│   ├── bench_p2p.sh              # Main benchmark script
-│   ├── tests/
-│   │   └── test_tcpx_perf.cc     # P2P test program
-│   ├── tcpx_impl.cc              # TCPX plugin wrapper (KEY FILE)
-│   ├── include/
-│   │   └── tcpx_interface.h      # API definitions
-│   ├── logs/                     # Test logs
-│   │   ├── bench_server_*.log
-│   │   ├── bench_client_*.log
-│   │   └── infomation.log        # ethtool stats, topology
-│   └── docs/
-│       ├── DEBUG_ETH2_RX_NO_CMSG.md  # Full debug report (READ FIRST)
-│       └── AI_HANDOFF_PROMPT.md      # This file
-├── collective/rdma/
-│   └── run_nccl_test_tcpx.sh     # Working NCCL reference
-└── scripts/node_ips/
-    └── tcpx.txt                  # Network configuration
+p2p/tcpx/docs/
+├── PROJECT_STATUS.md          # Current status (READ FIRST)
+├── DIAGNOSTICS_SUMMARY.md     # IRQ investigation results
+├── SINGLE_PROCESS_PLAN.md     # Refactor plan
+├── AI_HANDOFF_PROMPT.md       # This file
+└── archive/                   # Historical docs
+    ├── DIAGNOSTICS_ANALYSIS.md (detailed version)
+    ├── IRQ_BINDING_INVESTIGATION_PLAN.md (obsolete)
+    └── ... (other historical docs)
 ```
 
 ---
 
-## Environment Variables Reference
+## Contact and Support
 
-### TCPX Configuration (from bench_p2p.sh)
-```bash
-NCCL_GPUDIRECTTCPX_SOCKET_IFNAME=eth1,eth2,eth3,eth4
-NCCL_GPUDIRECTTCPX_CTRL_DEV=eth0
-NCCL_GPUDIRECTTCPX_UNIX_CLIENT_PREFIX=/run/tcpx
-NCCL_GPUDIRECTTCPX_TX_BINDINGS="eth1:8-21,112-125;eth2:8-21,112-125;..."
-NCCL_GPUDIRECTTCPX_RX_BINDINGS="eth1:22-35,126-139;eth2:22-35,126-139;..."
-```
-
-### Plugin Loading (from tcpx_impl.cc)
-```bash
-UCCL_TCPX_PLUGIN_PATH=/usr/local/tcpx/lib64/libnccl-net-tcpx.so  # default
-LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/nvidia/lib64:/var/lib/tcpx/lib64:...
-```
-
-### Debug Logging
-```bash
-NCCL_DEBUG=INFO
-NCCL_DEBUG_SUBSYS=ENV,NET,INIT
-UCCL_TCPX_DEBUG=1
-```
+- **Logs**: `p2p/tcpx/logs/fullmesh_*.log`
+- **Diagnostics**: `/home/daniel/uccl/diagnostics/`
+- **Reference**: NCCL tests in `collective/rdma/`
 
 ---
 
-## Last Known State
-
-- **Date**: 2025-10-06
-- **Status**: Issue reproduced consistently, environment verified, root cause unknown
-- **Next Step**: Instrument tcpx_impl.cc to trace plugin API calls for eth1 vs eth2
-- **Blocker**: Need to identify why eth2 doesn't trigger devmem registration in P2P code
-
----
-
-## Questions to Guide Investigation
-
-1. Does `tcpx_get_properties()` return different values for eth1 vs eth2?
-2. Is the device index mapping correct when `--ifaces=eth2` is specified?
-3. Does `ncclNetListen()` get called with the same parameters for both NICs?
-4. Is there a timing difference in flow steering rule creation?
-5. Does the plugin have internal state that differs between first NIC (eth1) and second NIC (eth2)?
-6. Are there any hardcoded assumptions about NIC order or names in our wrapper code?
-
----
-
-## Expected Time to Resolution
-
-- **With focused debugging**: 2-4 hours (add logging, compare traces, identify divergence)
-- **With code fix**: +1-2 hours (implement fix, test, verify)
-- **Total estimate**: 3-6 hours for experienced developer with AI assistance
-
----
-
-## Success Indicators During Debug
-
-- [ ] Can reproduce issue consistently (DONE)
-- [ ] Have verbose logs for both eth1 (working) and eth2 (failing) (TODO)
-- [ ] Identified first point of divergence in code path (TODO)
-- [ ] Understand why divergence causes devmem to not activate (TODO)
-- [ ] Have proposed fix with clear rationale (TODO)
-- [ ] Fix tested and verified with ethtool counters (TODO)
-
----
-
-## Final Notes
-
-This is a **code path issue**, not an environmental issue. The smoking gun is that NCCL uses eth2 successfully with the same plugin, same hardware, same kernel. Our P2P code does something different that prevents eth2's devmem path from activating.
-
-Focus on **comparative analysis** (eth1 vs eth2 in our code) rather than absolute debugging (trying to understand TCPX plugin internals).
-
-Good luck! 🚀
+**Last Updated**: 2025-10-07  
+**Next Action**: Implement single-process refactor (see SINGLE_PROCESS_PLAN.md)
 

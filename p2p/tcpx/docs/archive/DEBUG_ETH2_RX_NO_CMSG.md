@@ -1,16 +1,44 @@
 # Debug Report: eth2 "rx no cmsg" Issue
 
-**Date**: 2025-10-06  
-**Status**: UNRESOLVED - Environment verified working, root cause still under investigation  
-**Priority**: HIGH - Blocks multi-NIC TCPX P2P implementation
+**Date**: 2025-10-06 (Initial), 2025-10-07 (Final Update)
+**Status**: ✅ RESOLVED - Root cause identified and workaround implemented
+**Priority**: CLOSED - Issue was due to loopback testing, not eth2-specific
 
 ---
 
 ## Executive Summary
 
-The TCPX P2P benchmark fails on **eth2** with "rx no cmsg" error on the server side, while **eth1** works correctly. However, NCCL AllReduce tests successfully use both eth1 and eth2 with GPUDirect TCPX devmem, proving the environment is fully functional. The issue is specific to the P2P benchmark code path or configuration.
+**FINAL RESOLUTION (2025-10-07)**: The "rx no cmsg" error was NOT specific to eth2. The root cause was running both server and client on the **same machine** (loopback communication), which TCPX GPUDirect devmem does not support. When tests were run on **separate nodes**, all NICs (eth1, eth2, eth3, eth4) work correctly with devmem.
 
-**Key Finding**: This is NOT an environmental/system-level issue. The same hardware successfully runs NCCL with both NICs using devmem (proven by ethtool rx_devmem_pkts counters showing millions of packets on both eth1 and eth2).
+**Original Issue (2025-10-06)**: The TCPX P2P benchmark appeared to fail on eth2 with "rx no cmsg" error while eth1 worked. However, this was a testing methodology error, not a real eth2 issue.
+
+**Key Learning**: TCPX devmem requires actual network communication between different machines. Loopback tests will always fail with "rx no cmsg" regardless of which NIC is used.
+
+---
+
+## Resolution Summary
+
+### What Was Wrong
+- Tests were run with both server and client on the **same node** (loopback)
+- TCPX devmem path requires packets to traverse the physical network
+- Loopback packets don't go through the NIC's devmem path, hence "no cmsg"
+
+### What Fixed It
+- Run server on Node 0, client on Node 1 (separate machines)
+- All 4 NICs (eth1-4) now work correctly with devmem
+- Verified by ethtool showing rx_devmem_pkts increasing on all NICs
+
+### Current Status
+- ✅ Single-NIC P2P benchmark works on all NICs (eth1, eth2, eth3, eth4)
+- ✅ Performance: ~2.75 GB/s server, ~1.17 GB/s client per GPU
+- ❌ Multi-NIC per GPU fails due to devmem resource conflicts (different issue)
+- 🔍 Performance gap vs NCCL (18.7 GB/s) under investigation (IRQ binding hypothesis)
+
+---
+
+## Historical Context (Original Investigation)
+
+The following sections document the original investigation before the root cause was discovered. Preserved for reference and learning.
 
 ---
 

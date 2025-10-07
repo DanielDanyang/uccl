@@ -1,0 +1,28 @@
+=== NCCL Test Diagnostics Summary ===
+Date: Tue Oct  7 06:05:17 PDT 2025
+Hostname: k-dd4e3d8ed5be80000
+Test: all_reduce_perf
+Processes: 2
+GPUs per process: 8
+Exit code: 0
+
+=== Binding Configuration ===
+TX_BINDINGS: eth1:8-21,112-125;eth2:8-21,112-125;eth3:60-73,164-177;eth4:60-73,164-177
+RX_BINDINGS: eth1:22-35,126-139;eth2:22-35,126-139;eth3:74-87,178-191;eth4:74-87,178-191
+
+=== Files Collected ===
+total 3.6M
+-rw-r--r-- 1 ray 1051080091  403 Oct  7 06:05 SUMMARY.txt
+-rw-r--r-- 1 ray 1051080091 3.1K Oct  7 06:04 cpu_topology_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091   61 Oct  7 06:04 cpu_usage_during_test_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091 3.7K Oct  7 06:04 env_vars_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091  14K Oct  7 06:04 irq_affinity_before_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091 665K Oct  7 06:05 irq_delta_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091 1.5M Oct  7 06:05 irq_monitoring_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091 710K Oct  7 06:05 irq_snapshot_after_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091 710K Oct  7 06:04 irq_snapshot_before_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091  653 Oct  7 06:05 nccl_metrics_summary.txt
+-rw-r--r-- 1 ray 1051080091  12K Oct  7 06:05 nccl_test_output.log
+-rw-r--r-- 1 ray 1051080091 3.4K Oct  7 06:04 nic_info_before_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091 2.3K Oct  7 06:05 nic_stats_after_k-dd4e3d8ed5be80000.txt
+-rw-r--r-- 1 ray 1051080091   61 Oct  7 06:04 numa_topology_k-dd4e3d8ed5be80000.txt

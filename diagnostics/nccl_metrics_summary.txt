@@ -1,0 +1,14 @@
+=== NCCL Performance Summary ===
+#       size         count      type   redop    root     time   algbw   busbw #wrong     time   algbw   busbw #wrong
+# Out of bounds values : 0 OK
+# Avg bus bandwidth    : 19.176 
+
+=== NCCL Thread Affinity ===
+
+=== NCCL Channel Setup ===
+k-dd4e3d8ed5be80000:2322:2335 [0] NCCL INFO NCCL_MAX_NCHANNELS set by environment to 8.
+k-dd4e3d8ed5be80000:2322:2342 [7] NCCL INFO NCCL_MIN_NCHANNELS set by environment to 8.
+k-dd4e3d8ed5be80001:1499:1512 [1] NCCL INFO NCCL_MAX_NCHANNELS set by environment to 8.
+k-dd4e3d8ed5be80001:1499:1512 [1] NCCL INFO NCCL_MIN_NCHANNELS set by environment to 8.
+
+=== NCCL Errors/Warnings ===

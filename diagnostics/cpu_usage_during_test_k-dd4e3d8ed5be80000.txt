@@ -1,0 +1,1 @@
+./run_nccl_test_tcpx.sh: line 112: mpstat: command not found
