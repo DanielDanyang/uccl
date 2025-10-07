@@ -69,8 +69,13 @@ test_devmem_validation: $(DEVICE_OBJS) $(CORE_OBJS)
 	@echo "Building test_devmem_validation..."
 	$(NVCC) $(NVCCFLAGS) -o tests/test_devmem_validation tests/test_devmem_validation.cc tcpx_impl.cc $(DEVICE_OBJS) $(CORE_OBJS) $(LIBS) $(CUDA_LIBS)
 
+# Simplified devmem validation test (sequential execution)
+test_devmem_simple: $(DEVICE_OBJS) $(CORE_OBJS)
+	@echo "Building test_devmem_simple..."
+	$(NVCC) $(NVCCFLAGS) -o tests/test_devmem_simple tests/test_devmem_simple.cc tcpx_impl.cc $(DEVICE_OBJS) $(CORE_OBJS) $(LIBS) $(CUDA_LIBS)
+
 # Build targets
-all: core test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_tcpx_perf_multi test_modules test_devmem_validation
+all: core test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_tcpx_perf_multi test_modules test_devmem_validation test_devmem_simple
 
 # All tests (only integration test remains)
 all_tests: all
@@ -101,9 +106,9 @@ check:
 clean:
 	@echo "Cleaning build artifacts..."
 	@echo "Removing executable files..."
-	rm -f tests/test_tcpx_transfer tests/test_tcpx_transfer_multi tests/test_tcpx_perf tests/test_tcpx_perf_multi tests/test_modules tests/test_devmem_validation
+	rm -f tests/test_tcpx_transfer tests/test_tcpx_transfer_multi tests/test_tcpx_perf tests/test_tcpx_perf_multi tests/test_modules tests/test_devmem_validation tests/test_devmem_simple
 	@echo "Removing object files..."
 	rm -f $(DEVICE_OBJS) $(CORE_OBJS) *.o
 	@echo "Clean completed. Source files preserved."
 
-.PHONY: all core quick check clean all_tests test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_tcpx_perf_multi test_modules test_devmem_validation
+.PHONY: all core quick check clean all_tests test_tcpx_transfer test_tcpx_transfer_multi test_tcpx_perf test_tcpx_perf_multi test_modules test_devmem_validation test_devmem_simple
