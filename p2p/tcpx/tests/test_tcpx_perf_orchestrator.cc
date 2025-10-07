@@ -519,8 +519,14 @@ int main(int argc, char** argv) {
     // Server Ready
     // ========================================
 
+    // Calculate actual total channels
+    int total_channels_ready = 0;
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      total_channels_ready += gpus[gpu_id].mgr->get_num_channels();
+    }
+
     std::cout << "\n=== ALL GPUs READY (SERVER) ===" << std::endl;
-    std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
+    std::cout << "Total channels: " << total_channels_ready << std::endl;
     std::cout << "Architecture: Single process, all NICs shared" << std::endl;
 
     // ========================================
@@ -558,18 +564,33 @@ int main(int argc, char** argv) {
 
     double total_time_ms = 0.0;
 
+    // Track all pending requests
+    struct PendingRecv {
+      void* request;
+      int gpu_id;
+      int channel_id;
+      int chunk_idx;
+    };
+    std::vector<PendingRecv> pending_recvs;
+
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "\n[SERVER] ===== Iteration " << iter << " =====" << std::endl;
 
       auto start = std::chrono::high_resolution_clock::now();
 
-      // Each GPU receives test_size_per_gpu bytes independently
-      // Round-robin chunks across channels within each GPU
-      int global_chunk_idx = 0;
+      pending_recvs.clear();
 
+      // Phase 1: Post all receives (async)
+      int global_chunk_idx = 0;
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
         int num_channels = ctx.mgr->get_num_channels();
+
+        // Defensive: skip GPU if no channels (NIC probe failure, etc.)
+        if (num_channels == 0) {
+          std::cerr << "[WARNING] GPU " << gpu_id << " has 0 channels, skipping" << std::endl;
+          continue;
+        }
 
         size_t offset = 0;
         int local_chunk_idx = 0;
@@ -588,7 +609,7 @@ int main(int argc, char** argv) {
           // Unique tag for this chunk (must match client)
           int tag = kTransferTag + iter * 100000 + gpu_id * 10000 + local_chunk_idx;
 
-          // Post receive
+          // Post receive (async)
           void* recv_data[1] = {dst_ptr};
           int recv_sizes[1] = {static_cast<int>(this_chunk)};
           int recv_tags[1] = {tag};
@@ -602,22 +623,31 @@ int main(int argc, char** argv) {
             return 1;
           }
 
-          // Simple completion: wait for this recv to complete before next
-          int done = 0, received_size = 0;
-          while (!done) {
-            tcpx_test(recv_request, &done, &received_size);
-            if (!done) {
-              std::this_thread::sleep_for(std::chrono::microseconds(10));
-            }
-          }
-
-          // Mark as consumed
-          tcpx_irecv_consumed(ch.recv_comm, 1, recv_request);
+          // Track this request
+          pending_recvs.push_back({recv_request, gpu_id, channel_local_id, local_chunk_idx});
 
           offset += this_chunk;
           local_chunk_idx++;
           global_chunk_idx++;
         }
+      }
+
+      std::cout << "[SERVER] Posted " << pending_recvs.size() << " async receives" << std::endl;
+
+      // Phase 2: Wait for all receives to complete
+      for (auto& pending : pending_recvs) {
+        int done = 0, received_size = 0;
+        while (!done) {
+          tcpx_test(pending.request, &done, &received_size);
+          if (!done) {
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+          }
+        }
+
+        // Mark as consumed
+        GPUContext& ctx = gpus[pending.gpu_id];
+        ChannelResources& ch = ctx.mgr->get_channel(pending.channel_id);
+        tcpx_irecv_consumed(ch.recv_comm, 1, pending.request);
       }
 
       auto end = std::chrono::high_resolution_clock::now();
@@ -746,8 +776,14 @@ int main(int argc, char** argv) {
     // Client Ready
     // ========================================
 
+    // Calculate actual total channels
+    int total_channels_ready = 0;
+    for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+      total_channels_ready += gpus[gpu_id].mgr->get_num_channels();
+    }
+
     std::cout << "\n=== ALL GPUs READY (CLIENT) ===" << std::endl;
-    std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
+    std::cout << "Total channels: " << total_channels_ready << std::endl;
     std::cout << "Architecture: Single process, all NICs shared" << std::endl;
 
     // ========================================
@@ -783,24 +819,39 @@ int main(int argc, char** argv) {
     std::cout << "[CLIENT] Chunk size: " << chunk_bytes << " bytes" << std::endl;
     std::cout << "[CLIENT] Total channels: " << total_channels << std::endl;
 
-    // Wait for server to be ready
-    std::cout << "\n[CLIENT] Waiting 5 seconds for server to be ready..." << std::endl;
-    sleep(5);
+    // Wait for server to be ready and post receives
+    std::cout << "\n[CLIENT] Waiting 10 seconds for server to post receives..." << std::endl;
+    sleep(10);
 
     double total_time_ms = 0.0;
+
+    // Track all pending requests
+    struct PendingSend {
+      void* request;
+      int gpu_id;
+      int channel_id;
+      int chunk_idx;
+    };
+    std::vector<PendingSend> pending_sends;
 
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "\n[CLIENT] ===== Iteration " << iter << " =====" << std::endl;
 
       auto start = std::chrono::high_resolution_clock::now();
 
-      // Each GPU sends test_size_per_gpu bytes independently
-      // Round-robin chunks across channels within each GPU
-      int global_chunk_idx = 0;
+      pending_sends.clear();
 
+      // Phase 1: Post all sends (async)
+      int global_chunk_idx = 0;
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
         int num_channels = ctx.mgr->get_num_channels();
+
+        // Defensive: skip GPU if no channels (NIC probe failure, etc.)
+        if (num_channels == 0) {
+          std::cerr << "[WARNING] GPU " << gpu_id << " has 0 channels, skipping" << std::endl;
+          continue;
+        }
 
         size_t offset = 0;
         int local_chunk_idx = 0;
@@ -819,7 +870,7 @@ int main(int argc, char** argv) {
           // Unique tag for this chunk (must match server)
           int tag = kTransferTag + iter * 100000 + gpu_id * 10000 + local_chunk_idx;
 
-          // Send the chunk
+          // Send the chunk (async)
           void* send_request = nullptr;
           if (tcpx_isend(ch.send_comm, src_ptr, static_cast<int>(this_chunk),
                          tag, ch.mhandle, &send_request) != 0) {
@@ -828,18 +879,25 @@ int main(int argc, char** argv) {
             return 1;
           }
 
-          // Simple completion: wait for this send to complete before next
-          int done = 0, sent_size = 0;
-          while (!done) {
-            tcpx_test(send_request, &done, &sent_size);
-            if (!done) {
-              std::this_thread::sleep_for(std::chrono::microseconds(10));
-            }
-          }
+          // Track this request
+          pending_sends.push_back({send_request, gpu_id, channel_local_id, local_chunk_idx});
 
           offset += this_chunk;
           local_chunk_idx++;
           global_chunk_idx++;
+        }
+      }
+
+      std::cout << "[CLIENT] Posted " << pending_sends.size() << " async sends" << std::endl;
+
+      // Phase 2: Wait for all sends to complete
+      for (auto& pending : pending_sends) {
+        int done = 0, sent_size = 0;
+        while (!done) {
+          tcpx_test(pending.request, &done, &sent_size);
+          if (!done) {
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+          }
         }
       }
 

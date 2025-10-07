@@ -294,7 +294,97 @@ NCCL (reference):         19.176 GB/s
 
 ---
 
-**Status**: ✅ All bugs fixed, compiled, ready to test  
-**Impact**: Bandwidth measurements now accurate and comparable to baseline  
+## 🛡️ Additional Defensive Fixes (2025-10-07)
+
+### Bug 4: Division by Zero Risk (CRITICAL) ✅
+
+**Problem**:
+- Code used `local_chunk_idx % num_channels` without checking if `num_channels == 0`
+- If `ChannelManager` returns 0 channels (NIC probe failure, env bug), would cause **SIGFPE**
+- Multi-process test has this guard, but orchestrator was missing it
+
+**Root Cause**:
+```cpp
+// DANGEROUS CODE:
+int num_channels = ctx.mgr->get_num_channels();
+int channel_local_id = local_chunk_idx % num_channels;  // SIGFPE if num_channels == 0!
+```
+
+**Fix**:
+```cpp
+// SAFE CODE:
+int num_channels = ctx.mgr->get_num_channels();
+
+// Defensive: skip GPU if no channels
+if (num_channels == 0) {
+  std::cerr << "[WARNING] GPU " << gpu_id << " has 0 channels, skipping" << std::endl;
+  continue;
+}
+
+int channel_local_id = local_chunk_idx % num_channels;  // Safe now
+```
+
+**Impact**:
+- ✅ Prevents crash if NIC probe fails
+- ✅ Gracefully skips GPUs with no channels
+- ✅ Clear warning message for debugging
+
+**Locations Fixed**:
+- Server: line 584 (added check before modulo)
+- Client: line 839 (added check before modulo)
+
+---
+
+### Bug 5: Incorrect Channel Count Logging (MEDIUM) ✅
+
+**Problem**:
+- Code logged `kNumGPUs * num_channels_per_gpu` assuming all GPUs have same channel count
+- After channel-manager fixes, GPUs may have different channel counts
+- Would report "64 channels" even if a NIC drops out
+
+**Root Cause**:
+```cpp
+// WRONG:
+std::cout << "Total channels: " << kNumGPUs * num_channels_per_gpu << std::endl;
+// Assumes all GPUs have num_channels_per_gpu channels
+```
+
+**Fix**:
+```cpp
+// CORRECT:
+int total_channels_ready = 0;
+for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
+  total_channels_ready += gpus[gpu_id].mgr->get_num_channels();  // Query actual count
+}
+std::cout << "Total channels: " << total_channels_ready << std::endl;
+```
+
+**Impact**:
+- ✅ Reports accurate channel count
+- ✅ Reflects actual available channels
+- ✅ Helps debug NIC probe issues
+
+**Locations Fixed**:
+- Server "ALL GPUs READY": line 523 (now uses actual count)
+- Client "ALL GPUs READY": line 780 (now uses actual count)
+- Server "Step 4": line 557 (already correct)
+- Client "Step 4": line 814 (already correct)
+
+---
+
+## 📊 Summary of All Fixes
+
+| Bug | Severity | Status | Impact |
+|-----|----------|--------|--------|
+| 1. Bandwidth calculation (8× inflated) | CRITICAL | ✅ Fixed | Accurate measurements |
+| 2. Buffer overflow risk | HIGH | ✅ Fixed | Supports up to 256 MB |
+| 3. Channel count assumption | MEDIUM | ✅ Fixed | Robust to variations |
+| 4. Division by zero (SIGFPE) | CRITICAL | ✅ Fixed | Prevents crashes |
+| 5. Incorrect channel logging | MEDIUM | ✅ Fixed | Accurate reporting |
+
+---
+
+**Status**: ✅ All bugs fixed, compiled, ready to test
+**Impact**: Bandwidth measurements now accurate, robust to failures, and comparable to baseline
 **Next Action**: Re-run tests and expect realistic (lower) bandwidth numbers
 
