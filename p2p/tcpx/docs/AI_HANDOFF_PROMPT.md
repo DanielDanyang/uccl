@@ -1,7 +1,7 @@
 # AI Assistant Handoff Prompt
 
-**Last Updated**: 2025-10-07  
-**Status**: IRQ investigation complete, single-process refactor planned  
+**Last Updated**: 2025-10-07
+**Status**: Step 2 (Control Plane) COMPLETE, Step 3 (Data Plane) ready to start
 **Purpose**: Quick context injection for new AI assistants
 
 ---
@@ -9,135 +9,124 @@
 ## Context Injection (Copy This)
 
 ```
-I'm working on a NIXL-TCPX plugin for GCP A3-high instances (2 nodes, 8× H100 GPUs, 4× gVNIC per node). 
+I'm working on a NIXL-TCPX plugin for GCP A3-high instances (2 nodes, 8× H100 GPUs, 4× gVNIC per node).
 The project uses Google's nccl-plugin-gpudirecttcpx APIs for GPU-to-GPU P2P over TCPX (GPUDirect over TCP).
 
 CURRENT STATUS (2025-10-07):
-- Single-NIC P2P: WORKING (2.75 GB/s server, 1.17 GB/s client per GPU)
-- NCCL Reference: WORKING (19.176 GB/s bus bandwidth)
-- IRQ Investigation: COMPLETE - IRQ affinity NOT the bottleneck
-- Next: Single-process architecture refactor to enable multi-NIC
+- ✅ Step 2.5: Devmem validation COMPLETE (single-process can use 4 channels on same NIC)
+- ✅ Step 2: Control plane refactor COMPLETE (orchestrator created, 64 channels working)
+- ⏳ Step 3: Data plane upgrade READY TO START (add actual data transfer)
+- Target: >15 GB/s bus bandwidth (NCCL baseline: 19.176 GB/s)
 
-KEY FINDINGS:
-1. ✅ IRQ affinity is NOT the bottleneck (NCCL uses default IRQ distribution)
-2. ✅ Thread CPU affinity IS important (NCCL pins to NUMA-local cores)
-3. ✅ Multi-NIC parallelism IS critical (NCCL uses 4 NICs, P2P uses 1)
-4. ✅ Process architecture matters (NCCL: 1 proc/8 GPUs, P2P: 8 procs/1 GPU)
-5. ❌ Multi-NIC per GPU fails in current architecture (devmem conflicts)
-
-ROOT CAUSE: Performance gap (~7x) due to process architecture, not IRQ affinity.
-- NCCL: 1 process/node → can share NICs across GPUs → multi-NIC per GPU works
-- P2P: 8 processes/node → cannot share NICs → devmem conflicts
+CRITICAL PROGRESS:
+1. ✅ Devmem conflicts RESOLVED - single-process architecture works!
+2. ✅ Control plane working - 1 process manages all 8 GPUs, 64 channels total
+3. ✅ All 4 NICs available to all GPUs (no more devmem conflicts)
+4. ✅ Bootstrap strategy implemented (per-GPU ports: 20000-20007)
+5. ✅ Bug fixes: duplicate listen, missing error checks, CUDA context leaks, accept retry logic
 
 WORKSPACE: /home/daniel/uccl
 
 KEY DOCS (read in order):
-1. p2p/tcpx/docs/PROJECT_STATUS.md - Current status and timeline
-2. p2p/tcpx/docs/DIAGNOSTICS_SUMMARY.md - IRQ investigation results
-3. p2p/tcpx/docs/SINGLE_PROCESS_PLAN.md - Refactor plan
-4. p2p/tcpx/README.md - Quick start
+1. p2p/tcpx/STEP2_COMPLETE.md - Step 2 completion status (READ FIRST)
+2. p2p/tcpx/BUGFIXES_ORCHESTRATOR.md - Recent bug fixes
+3. p2p/tcpx/docs/SINGLE_PROCESS_PLAN.md - Overall refactor plan
+4. p2p/tcpx/docs/PROJECT_STATUS.md - Historical context
 
 KEY FILES:
-- p2p/tcpx/run_p2p_fullmesh.sh - Current P2P launcher (8 processes)
-- p2p/tcpx/tests/test_tcpx_perf_multi.cc - P2P benchmark program
-- p2p/tcpx/src/channel_manager.cc - Channel management
-- collective/rdma/run_nccl_test_tcpx.sh - NCCL reference
+- p2p/tcpx/run_p2p_singleproc.sh - NEW single-process launcher
+- p2p/tcpx/tests/test_tcpx_perf_orchestrator.cc - NEW orchestrator (Step 2 complete)
+- p2p/tcpx/tests/test_devmem_validation.cc - Devmem validation test
+- p2p/tcpx/src/channel_manager.cc - Channel management (recently fixed accept retry)
+- p2p/tcpx/run_p2p_fullmesh.sh - OLD multi-process launcher (working baseline)
 
 IMMEDIATE TASK:
-Implement single-process architecture refactor (see SINGLE_PROCESS_PLAN.md)
-- Goal: Enable multi-NIC per GPU (no devmem conflicts)
-- Timeline: ~5-7 days
-- Target: >15 GB/s bus bandwidth
+Implement Step 3: Data Plane Upgrade (see SINGLE_PROCESS_PLAN.md)
+- Add actual data transfer to orchestrator
+- Implement round-robin channel selection
+- Add sliding window flow control
+- Integrate unpack kernel
+- Timeline: 2-3 days
+- Expected: >10 GB/s bandwidth
 
-START BY: Reading p2p/tcpx/docs/PROJECT_STATUS.md and SINGLE_PROCESS_PLAN.md
+START BY: Reading p2p/tcpx/STEP2_COMPLETE.md and logs/singleproc_*.log
 ```
 
 ---
 
 ## Quick Start for New AI
 
-### 1. Read Core Documentation
+### 1. Read Recent Progress
 ```bash
-# Project status
-view p2p/tcpx/docs/PROJECT_STATUS.md
+# Step 2 completion status (READ FIRST)
+view p2p/tcpx/STEP2_COMPLETE.md
 
-# IRQ investigation results
-view p2p/tcpx/docs/DIAGNOSTICS_SUMMARY.md
+# Recent bug fixes
+view p2p/tcpx/BUGFIXES_ORCHESTRATOR.md
 
-# Refactor plan
+# Overall refactor plan
 view p2p/tcpx/docs/SINGLE_PROCESS_PLAN.md
+
+# Check latest test logs
+view p2p/tcpx/logs/singleproc_server_*.log
+view p2p/tcpx/logs/singleproc_client_*.log
 ```
 
-### 2. Verify Current P2P Works
+### 2. Verify Step 2 Works (Control Plane)
 ```bash
 cd /home/daniel/uccl/p2p/tcpx
+
+# Build orchestrator
+make test_tcpx_perf_orchestrator
 
 # Node 0 (Server)
-./run_p2p_fullmesh.sh server
+./run_p2p_singleproc.sh server
 
 # Node 1 (Client)
-./run_p2p_fullmesh.sh client <NODE0_IP>
+./run_p2p_singleproc.sh client <NODE0_IP>
 
 # Check results
-grep "PERF.*Avg.*BW:" logs/fullmesh_*.log
-# Expected: ~2.75 GB/s (server), ~1.17 GB/s (client)
+tail -50 logs/singleproc_server_*.log
+tail -50 logs/singleproc_client_*.log
+
+# Expected output:
+# - All 8 GPUs initialized
+# - All 64 channels created (8 GPUs × 8 channels)
+# - All channels accepted connections
+# - All channels registered memory
+# - "=== ALL GPUs READY ===" message
 ```
 
-### 3. Review NCCL Reference
+### 3. Understand Current Architecture
 ```bash
-cd /home/daniel/uccl/collective/rdma
+# Single-process orchestrator (Step 2 complete)
+view p2p/tcpx/tests/test_tcpx_perf_orchestrator.cc
 
-# Run NCCL test
-./run_nccl_test_tcpx.sh nccl 2 8 0 1 1
+# Channel manager (recently fixed accept retry)
+view p2p/tcpx/src/channel_manager.cc
 
-# Check results
-cat diagnostics/nccl_*/nccl_metrics_summary.txt
-# Expected: ~19 GB/s bus bandwidth
+# Compare with old multi-process version
+view p2p/tcpx/tests/test_tcpx_perf_multi.cc
 ```
 
-### 4. Start Refactor (Step 1)
+### 4. Start Step 3 (Data Plane)
 ```bash
 cd /home/daniel/uccl/p2p/tcpx
 
-# Read the plan
-view docs/SINGLE_PROCESS_PLAN.md
+# Read Step 3 requirements in plan
+view docs/SINGLE_PROCESS_PLAN.md  # Look for "Step 3: Data Plane Upgrade"
 
-# Create prototype launcher
-cp run_p2p_fullmesh.sh run_p2p_singleproc.sh
-vim run_p2p_singleproc.sh  # Remove per-GPU forking
+# Study existing data transfer logic
+view tests/test_tcpx_perf_multi.cc  # Lines 600-800 (send/recv loops)
 
-# Create orchestrator skeleton
-cp tests/test_tcpx_perf_multi.cc tests/test_tcpx_perf_orchestrator.cc
-vim tests/test_tcpx_perf_orchestrator.cc  # Add multi-threaded worker model
+# Plan modifications to orchestrator
+# TODO: Add per-GPU worker threads
+# TODO: Implement round-robin channel selection
+# TODO: Add sliding window flow control
+# TODO: Integrate unpack kernel
 ```
 
----
 
-## Expected AI Workflow
-
-1. **Understand Context** (30 min)
-   - Read PROJECT_STATUS.md
-   - Read DIAGNOSTICS_SUMMARY.md
-   - Read SINGLE_PROCESS_PLAN.md
-
-2. **Verify Environment** (15 min)
-   - Run current P2P benchmark
-   - Confirm 2.75 GB/s baseline
-
-3. **Plan Implementation** (1 hour)
-   - Review SINGLE_PROCESS_PLAN.md steps
-   - Ask clarifying questions if needed
-   - Confirm approach with user
-
-4. **Implement Step-by-Step** (5-7 days)
-   - Follow SINGLE_PROCESS_PLAN.md timeline
-   - Test after each step
-   - Document progress
-
-5. **Validate and Measure** (2-3 days)
-   - Run validation tests (Step 6 in plan)
-   - Compare to NCCL baseline
-   - Document results
 
 ---
 

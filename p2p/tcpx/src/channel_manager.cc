@@ -264,15 +264,27 @@ ChannelManager::ChannelManager(int num_channels, int gpu_id)
   }
 
   if ((int)selected.size() < num_channels_) {
-    // Replicate the best NICs to satisfy the requested channel count. NCCL also
-    // opens multiple connections per NIC to increase pipeline depth.
-    size_t base = selected.size();
-    if (base == 0) {
-      selected.push_back(sorted.front());
-      base = 1;
+    // Phase 1 Fix: Round-robin across ALL available NICs to avoid saturating a single NIC.
+    // This prevents accept stalls when multiple GPUs try to use the same NIC.
+    // Build a pool of all CUDA-supported NICs for round-robin distribution.
+    std::vector<Candidate> pool;
+    for (const auto& cand : sorted) {
+      if (cand.cuda_supported) {
+        pool.push_back(cand);
+      }
     }
+
+    if (pool.empty()) {
+      // Fallback: if no CUDA-supported NICs, use the first available NIC
+      pool.push_back(sorted.front());
+    }
+
+    std::cout << "[ChannelManager] GPU " << gpu_id_ << ": Distributing " << num_channels_
+              << " channels across " << pool.size() << " NICs (round-robin)" << std::endl;
+
+    // Round-robin across all NICs in the pool
     while ((int)selected.size() < num_channels_) {
-      const Candidate& src = selected[selected.size() % base];
+      const Candidate& src = pool[selected.size() % pool.size()];
       selected.push_back(src);
     }
   }
