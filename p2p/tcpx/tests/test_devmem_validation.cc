@@ -219,11 +219,15 @@ int main(int argc, char** argv) {
     }
     
     std::cout << "[CLIENT] Registered memory on " << num_channels << " channels" << std::endl;
-    
+
     std::cout << "\n=== ALL CHANNELS PASSED (CLIENT) ===" << std::endl;
     std::cout << "Result: Single-process CAN use " << num_channels << " channels on same NIC" << std::endl;
     std::cout << "Devmem conflicts: RESOLVED" << std::endl;
-    
+
+    // Wait for server to finish (so it can accept our connections)
+    std::cout << "\n[CLIENT] Waiting 5 seconds for server to complete..." << std::endl;
+    sleep(5);
+
     // Cleanup
     mgr.deregister_memory(false);
     mgr.close_all(false);
