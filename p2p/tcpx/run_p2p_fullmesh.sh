@@ -77,7 +77,7 @@ BOOTSTRAP_BASE=${UCCL_TCPX_BOOTSTRAP_PORT_BASE:-20000}
 PERF_SIZE=${UCCL_TCPX_PERF_SIZE:-67108864}
 PERF_ITERS=${UCCL_TCPX_PERF_ITERS:-20}
 CHUNK_BYTES=${UCCL_TCPX_CHUNK_BYTES:-524288}
-CHANNELS=${UCCL_TCPX_NUM_CHANNELS:-4}  # 4 connections per GPU (pipeline parallelism)
+CHANNELS=${UCCL_TCPX_NUM_CHANNELS:-2}  # 2 channels per GPU (recommended)
 LOG_DIR=${LOG_DIR:-"$(dirname "$0")/logs"}
 mkdir -p "${LOG_DIR}"
 
@@ -96,8 +96,9 @@ map_gpu_to_ifaces() {
 export PATH="/usr/local/cuda/bin:/usr/local/nvidia/bin:${PATH}"
 export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/nvidia/lib64:/var/lib/tcpx/lib64:${LD_LIBRARY_PATH:-}"
 export NCCL_GPUDIRECTTCPX_CTRL_DEV="eth0"
-# With 4 channels, each channel = 1 connection, so NSOCKS=1 (not 4!)
-export NCCL_NSOCKS_PERTHREAD=1
+# Configuration: 2 channels × 2 sockets = 4 sockets per GPU
+# 2 GPUs share 1 NIC → 8 sockets per NIC (MAX_SOCKETS=8)
+export NCCL_NSOCKS_PERTHREAD=2
 export NCCL_SOCKET_NTHREADS=1
 export NCCL_DYNAMIC_CHUNK_SIZE=524288
 export NCCL_P2P_NET_CHUNKSIZE=524288

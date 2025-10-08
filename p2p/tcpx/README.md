@@ -21,10 +21,9 @@
 > ```
 >
 > **Architecture**:
-> - Each GPU: 4 TCPX connections (UCCL_TCPX_NUM_CHANNELS=4)
-> - Each connection: 1 socket (NCCL_NSOCKS_PERTHREAD=1)
+> - Each GPU: 2 channels × 2 sockets = 4 sockets total (UCCL_TCPX_NUM_CHANNELS=2, NCCL_NSOCKS_PERTHREAD=2)
 > - GPU → NIC mapping: {0,1}→eth1, {2,3}→eth2, {4,5}→eth3, {6,7}→eth4
-> - 2 GPUs share 1 NIC → 8 connections per NIC (MAX_SOCKETS=8)
+> - 2 GPUs share 1 NIC → 8 sockets per NIC (MAX_SOCKETS=8)
 >
 > **Primary docs**:
 > - [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - 实施总结（中文）

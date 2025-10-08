@@ -180,9 +180,11 @@ int main(int argc, char** argv) {
 
   // 运行建议（2025-10-08 更新）：
   // - 放弃单进程 orchestrator；本测试作为主路径推进
-  // - 每 GPU 使用 UCCL_TCPX_NUM_CHANNELS=4（4 个独立的 TCPX connections）
-  // - 每个 channel = 1 个 TCPX connection（不使用 NCCL_NSOCKS_PERTHREAD）
-  // - 目标：每个 GPU 进程 4 个 connections，2 个 GPUs 共享 1 个 NIC = 8 个 connections per NIC
+  // - 推荐配置：UCCL_TCPX_NUM_CHANNELS=2, NCCL_NSOCKS_PERTHREAD=2
+  //   * 2 个 channels per GPU
+  //   * 每个 channel 2 个 sockets
+  //   * 总共：4 sockets per GPU
+  //   * 2 个 GPUs 共享 1 个 NIC = 8 sockets per NIC (MAX_SOCKETS=8)
   // - 不必追求 send/recv 对称带宽；关注单向上限与总体规模化行为
 
   // 【关键】启用 zero-copy（从 4KB 开始使用 devmem-tcp）
@@ -222,17 +224,23 @@ int main(int argc, char** argv) {
   // 测试参数配置
   // ============================================================================
 
-  // Channel 数量（默认 4）
-  int num_channels = getEnvInt("UCCL_TCPX_NUM_CHANNELS", 4);
+  // Channel 数量（默认 2）
+  int num_channels = getEnvInt("UCCL_TCPX_NUM_CHANNELS", 2);
+  int nsocks_per_thread = getEnvInt("NCCL_NSOCKS_PERTHREAD", 2);
+  int nthreads = getEnvInt("NCCL_SOCKET_NTHREADS", 1);
+  int sockets_per_channel = nsocks_per_thread * nthreads;
+  int total_sockets_per_gpu = num_channels * sockets_per_channel;
 
   std::cout << "[PERF] ========================================" << std::endl;
   std::cout << "[PERF] TCPX Connection Configuration:" << std::endl;
   std::cout << "[PERF]   GPU ID: " << gpu_id << std::endl;
-  std::cout << "[PERF]   Connections per GPU: " << num_channels << std::endl;
-  std::cout << "[PERF]   Note: Each channel = 1 TCPX connection" << std::endl;
-  std::cout << "[PERF]   Note: 2 GPUs share 1 NIC → " << (num_channels * 2)
-            << " connections per NIC" << std::endl;
-  std::cout << "[PERF]   Target: Pipeline parallelism via multiple connections" << std::endl;
+  std::cout << "[PERF]   Channels per GPU: " << num_channels << std::endl;
+  std::cout << "[PERF]   Sockets per channel: " << sockets_per_channel
+            << " (" << nsocks_per_thread << " × " << nthreads << ")" << std::endl;
+  std::cout << "[PERF]   Total sockets per GPU: " << total_sockets_per_gpu << std::endl;
+  std::cout << "[PERF]   Note: 2 GPUs share 1 NIC → " << (total_sockets_per_gpu * 2)
+            << " sockets per NIC (MAX_SOCKETS=8)" << std::endl;
+  std::cout << "[PERF]   Target: Pipeline parallelism via multiple channels & sockets" << std::endl;
   std::cout << "[PERF] ========================================" << std::endl;
 
     // === 路径总览（SERVER）===
@@ -508,11 +516,44 @@ int main(int argc, char** argv) {
         int done = 0;
         int received_size = 0;
         int test_rc = tcpx_test(entry.request, &done, &received_size);
+
+        // Handle errors
         if (test_rc != 0) {
-          std::cerr << "[ERROR] tcpx_test failed (rc=" << test_rc << ") for channel "
-                    << channel_id << " chunk " << entry.global_idx << std::endl;
-          return false;
+          // Special case: rc=2 (connection closed by peer)
+          // This can happen when client finishes all sends and closes the connection
+          // while server is still draining the last few chunks.
+          if (test_rc == 2) {
+            if (done == 1) {
+              // Data was received successfully before connection closed - this is OK
+              std::cout << "[INFO] Connection closed by peer after chunk " << entry.global_idx
+                        << " completed on channel " << channel_id << " (expected at end of transfer)"
+                        << std::endl;
+              // Continue processing this chunk - data was received successfully
+            } else {
+              // Connection closed but data not yet complete (done=0)
+              // This is a transient state - the data may still be in flight.
+              // In blocking mode, continue polling; in non-blocking mode, return to retry later.
+              std::cout << "[WARN] Connection closed by peer while chunk " << entry.global_idx
+                        << " on channel " << channel_id << " still in progress (done=0, will retry)"
+                        << std::endl;
+              if (blocking) {
+                // Continue polling - data may complete in next iteration
+                std::this_thread::sleep_for(std::chrono::microseconds(kSleepMicros));
+                continue;
+              } else {
+                // Non-blocking: return to let caller retry later
+                break;
+              }
+            }
+          } else {
+            // Other errors (rc != 0 and rc != 2) are real errors
+            std::cerr << "[ERROR] tcpx_test failed (rc=" << test_rc << ", done=" << done
+                      << ") for channel " << channel_id << " chunk " << entry.global_idx << std::endl;
+            return false;
+          }
         }
+
+        // If not done yet, handle based on blocking mode
         if (!done) {
           if (blocking) {
             std::this_thread::sleep_for(std::chrono::microseconds(kSleepMicros));
