@@ -1,3 +1,138 @@
+# AI Assistant Handoff Prompt (Updated)
+
+Last Updated: 2025-10-08
+Status: Step 3 (Data plane) IN PROGRESS — sliding window + continuous progress implemented; awaiting on-hardware verification and Google feedback
+Purpose: One-page, current, actionable context for next developer/AI. Legacy content below is outdated; start here.
+
+---
+
+> PIVOT (2025-10-08): Orchestrator path is deprecated for now. Proceed with the multi-process baseline and make each GPU open 4 TCPX connections (per vendor guidance: one channel ≈ one TCPX connection; prefer single 200Gbps NIC + ~8 connections for per-NIC max; GPU should stick to NUMA-local NIC).
+
+### New Working Plan (Multi-Process)
+- Target: multi-process benchmark only (tests/test_tcpx_perf_multi.cc)
+- Per-GPU connections: set UCCL_TCPX_NUM_CHANNELS=4 (each GPU opens 4 TCPX connections)
+- Run:
+  - Server (node0): `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0`
+  - Client (node1): `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <NODE0_IP> 0`
+- Measurement: do not expect symmetric send/recv GB/s; client send window=12, server recv window=16; recv requires consumed; cadence and NUMA/NIC binding matter
+- Orchestrator docs below are historical; keep for reference only
+
+## Copy-paste this block to brief the next AI (start here)
+```
+ROLE: You are the next AI developer taking over the NIXL-TCPX P2P benchmark.
+GOAL (pivoted): Use the multi-process baseline only and run with 4 TCPX connections per GPU. Orchestrator path is deprecated for now.
+
+DO NOW (2 nodes):
+1) Build on both nodes:
+   cd p2p/tcpx && make -j
+2) Run server on Node0:
+   UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0
+3) Run client on Node1:
+   UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <SERVER_IP> 0
+4) Expect send/recv bandwidth to be asymmetric (by design). Focus on stability and trend.
+5) If it stalls: enable TRACE (NCCL_DEBUG=INFO, NCCL_DEBUG_SUBSYS=NET,INIT, NCCL_GPUDIRECTTCPX_DEBUG_LEVEL=TRACE) and follow DEBUG_GUIDE.md.
+
+CONSTRAINTS:
+- Do not install new system packages without permission; tests/linters/builds OK.
+- Keep per-GPU connections at 4 via UCCL_TCPX_NUM_CHANNELS=4 (for now).
+- NUMA/NIC mapping can remain default; static mapping can be added later if needed.
+
+SUCCESS CRITERIA (first pass):
+- Iteration 0 completes on both sides; windows drain as expected; no deadlocks.
+- Increasing data size shows reasonable scaling; per-NIC max on a single 200Gbps NIC tops near ~21.26 GB/s when using ~8 conns (vendor note).
+
+KEY FILES:
+- tests/test_tcpx_perf_multi.cc (heavy Chinese comments explain windows/progress)
+- ../HANDOFF_README.md (runbook), ../DEBUG_GUIDE.md (TRACE triage)
+
+FOLLOW-UPS (optional):
+- Collect a short run log with TRACE enabled and summarize rc/done patterns.
+- If needed, propose static GPU→NIC mapping and per-GPU NUMA pinning (per vendor guidance).
+```
+
+
+
+## Context (TL;DR)
+- Project: NIXL-TCPX plugin P2P benchmark on GCP A3-high (2 nodes, 8× H100, 4× gVNIC)
+- Interface: Google nccl-plugin-gpudirecttcpx (TCPX / GPUDirect over TCP)
+- Architecture: Multi-process baseline (one process per GPU). Orchestrator is deprecated for now.
+
+## Current Status
+- Working path: multi-process test (tests/test_tcpx_perf_multi.cc)
+- Data plane: async + sliding window + continuous progress; FIFO-only tcpx_test on head; recv calls tcpx_irecv_consumed()
+- Windows: recv per-comm=16; send per-comm=12
+- Debugging: TRACE instructions ready; rc/done/size logs in tests
+- External: Guidance from Google applied (prefer per-NIC max on single NIC with ~8 conns; NUMA-local NIC mapping; no app-level ACK)
+
+## How to Run (2 nodes, multi-process baseline)
+```bash
+# Build (on both nodes)
+cd p2p/tcpx
+make -j
+
+# Server (Node 0)
+UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0
+
+# Client (Node 1)
+UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <SERVER_IP> 0
+
+# Optional diagnostics
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=NET,INIT
+export NCCL_GPUDIRECTTCPX_DEBUG_LEVEL=TRACE
+```
+
+## What Good Looks Like
+- Server: first 16 recvs posted; logs show requests being released; Iteration 0 completes
+- Client: "released send request …" messages continue; Iteration 0 completes; bandwidth printed
+
+## If It Stalls (most common)
+- Symptom: Server window stuck at 16/16; tcpx_test logs show rc=0, done=0 repeatedly
+  - Action: Confirm progress_channel() is called non-blocking after each post (current + all other channels)
+  - Action: Confirm window-full path uses progress_channel(blocking=true)
+  - Action: Enable TRACE; check next_transmitting changes and queue shrinking
+- Symptom: Only a few "opportunistically released" on client, then nothing
+  - Action: Same as above; verify send side also drives progress
+- Symptom: done=1 but no release
+  - Action: Verify tcpx_irecv_consumed() called after done=1 (recv); memcpy path doesn’t require kernel but must respect done
+
+## Key Files (start here)
+- tests/test_tcpx_perf_multi.cc — multi-process benchmark (primary)
+- include/sliding_window.h, src/sliding_window.cc — sliding window with 0/1/-1 semantics
+- src/channel_manager.{h,cc}, src/bootstrap.{h,cc} — control-plane
+- tests/test_tcpx_perf_orchestrator.cc — historical reference only (deprecated)
+
+## Open Questions to Google (sent)
+- Channel→socket multiplexing with MAX_SOCKETS=8 and NCHANNELS=8; NUMA mapping guidance
+- Progress cadence: Does tcpx_test(rc=0, done=0) advance state? recommended call frequency in single-process
+- Recv lifecycle: correct consumed timing; whether memcpy path needs unpack flags
+- Multi-NIC scheduling/binding patterns in plugin/NCCL code; pointers to key functions
+
+
+## New Guidance from Google (2025-10-08)
+- One channel ≈ one TCPX connection in the NCCL plugin; in our NIXL plugin, treat connections directly and don’t over-index on the channel abstraction
+- Preferred per-NIC max measurement: single 200Gbps NIC with ~8 TCPX connections (~21.26 GB/s ceiling)
+- NUMA: keep each GPU on its NUMA-local NIC(s); OK to hardcode a static GPU→NIC map for now (GPU0,1→NIC0; GPU2,3→NIC1; ...)
+- vLLM mode: one process per GPU; each process operates a single NIC
+- Keep NCCL’s threading mechanism for now; no app-level ACK required (simple send/recv is sufficient)
+
+## Next Steps (checklist)
+- [ ] Run minimal case with CHANNELS=1 and verify Iteration 0 completes
+- [ ] Scale channels and record per-GPU bandwidth; confirm release pattern persists
+- [ ] If stalls persist, collect TRACE (NET,INIT + TCPX TRACE) and correlate with rc/done/size logs
+- [ ] Integrate any Google feedback (channel→socket, cadence, consumed timing)
+- [ ] Consider a dedicated progress thread per-comm if cadence still insufficient in single-process
+
+## Pointers to Detail
+- Handoff overview: p2p/tcpx/HANDOFF_README.md
+- Executive summary (CN): p2p/tcpx/REPORT_EXEC_SUMMARY_CN.md
+- Debug guide (how to read TRACE): p2p/tcpx/DEBUG_GUIDE.md
+- Archive index (historical docs only): p2p/tcpx/docs/archive/README.md
+
+---
+
+Below is legacy content (outdated); retained for historical context. Start from the updated section above.
+
 # AI Assistant Handoff Prompt
 
 **Last Updated**: 2025-10-07
@@ -268,6 +403,6 @@ p2p/tcpx/docs/
 
 ---
 
-**Last Updated**: 2025-10-07  
+**Last Updated**: 2025-10-07
 **Next Action**: Implement single-process refactor (see SINGLE_PROCESS_PLAN.md)
 

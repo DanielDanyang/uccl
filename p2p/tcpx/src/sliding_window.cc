@@ -53,6 +53,15 @@ int SlidingWindow::try_release_oldest(void* comm, bool is_recv) {
   int size = 0;
   int rc = tcpx_test(oldest_req, &done, &size);
 
+  // 🔍 调试：打印 tcpx_test 的返回值
+  static int debug_count = 0;
+  if (debug_count < 50) {  // 只打印前 50 次，避免刷屏
+    std::cout << "[DEBUG][SlidingWindow] tcpx_test: chunk_idx=" << oldest_idx
+              << " rc=" << rc << " done=" << done << " size=" << size
+              << " is_recv=" << is_recv << std::endl;
+    debug_count++;
+  }
+
   if (rc != 0) {
     // Request not ready yet (not at front of TCPX's internal queue)
     // This is expected behavior - just return "not ready"

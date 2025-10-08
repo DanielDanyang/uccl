@@ -1,5 +1,12 @@
 # TCPX P2P Benchmark
 
+> PIVOT (2025-10-08): We are deprecating the single-process orchestrator path. Use the multi-process test with 4 TCPX connections per GPU.
+> Quick Start (per-GPU 4 conns):
+> - Server: `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0`
+> - Client: `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <SERVER_IP> 0`
+> Primary docs: [docs/AI_HANDOFF_PROMPT.md](docs/AI_HANDOFF_PROMPT.md), [HANDOFF_README.md](HANDOFF_README.md), [DEBUG_GUIDE.md](DEBUG_GUIDE.md), [REPORT_EXEC_SUMMARY_CN.md](REPORT_EXEC_SUMMARY_CN.md)
+
+
 GPU-to-GPU P2P communication using Google's TCPX (GPUDirect over TCP) for GCP A3-high instances.
 
 ## Quick Start

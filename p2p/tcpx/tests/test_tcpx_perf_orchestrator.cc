@@ -109,6 +109,19 @@
 #include <chrono>
 #include <thread>
 
+// ----------------------------------------------------------------------------
+// New Guidance from Google (2025-10-08)
+// ----------------------------------------------------------------------------
+// - One channel ≈ one TCPX connection in NCCL plugin; for NIXL we can treat
+//   connections directly and not over-index on the "channel" abstraction.
+// - Target setup: Prefer 1 NIC with ~8 TCPX connections when measuring per-NIC
+//   max (≈21.26 GB/s is near the ceiling for a 200 Gbps NIC).
+// - NUMA: Expect each GPU to stick to its NUMA-local NIC(s). For now, hardcode
+//   GPU→NIC mapping in a static array (e.g., GPU0,1→NIC0; GPU2,3→NIC1; ...).
+// - vLLM usage: one process per GPU; each process operates a single NIC.
+// - Threading: Keep NCCL's threading mechanism for now.
+// - ACK: No client-side ACK needed; simple send/recv is sufficient.
+
 namespace {
 
 // ============================================================================
@@ -330,7 +343,7 @@ int main(int argc, char** argv) {
   // Allocate context structures for all 8 GPUs
   // These will be populated in the loop below
   std::vector<GPUContext> gpus(kNumGPUs);
-  
+
   // ========================================
   // Initialize Each GPU
   // ========================================
@@ -464,7 +477,7 @@ int main(int argc, char** argv) {
       close(bootstrap_fd);
       std::cout << "[GPU " << gpu_id << "] Sent " << ctx.handles.size() << " handles" << std::endl;
     }
-    
+
     // ========================================
     // Step 3: Accept Connections
     // ========================================
@@ -592,6 +605,37 @@ int main(int argc, char** argv) {
         }
       }
 
+      // PROGRESS STRATEGY (server/recv):
+      // ---------------------------------
+      // This lambda centralizes our progress policy to faithfully mimic
+      // test_tcpx_perf_multi's behavior:
+      // - FIFO only: always test the head request (matches TCPX rq.next_transmitting)
+      // - Non-blocking mode: try to drain as much as possible until we hit "not ready"
+      // - Blocking mode: when the window is full, sleep+retry until at least one is released
+      // - Returns false only on real errors (rc == -1 from try_release_oldest)
+
+      // Helper: drain a channel's sliding window using try_release_oldest()
+      // - blocking=false: do a best-effort non-blocking pump (returns after first not-ready)
+      // - blocking=true: wait until window shrinks to 0 (or error)
+      auto progress_channel = [&](int gpu, int ch_id, ChannelResources& ch, SlidingWindow* win,
+                                   bool is_recv, bool blocking) -> bool {
+        while (win->size() > 0) {
+          int rc = win->try_release_oldest(is_recv ? ch.recv_comm : ch.send_comm, is_recv);
+          if (rc == 0) {
+            // released one; continue draining if more pending
+            continue;
+          } else if (rc == 1) {
+            if (!blocking) return true;  // non-blocking mode: return to caller
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+          } else {
+            std::cerr << "[ERROR] progress_channel failed for GPU " << gpu
+                      << " channel " << ch_id << std::endl;
+            return false;
+          }
+        }
+        return true;
+      };
+
       // Process all chunks with sliding window
       int global_chunk_idx = 0;
       std::cout << "[SERVER] Starting to post receives for iteration " << iter << std::endl;
@@ -607,6 +651,8 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "[SERVER] Processing GPU " << gpu_id << " with " << num_channels << " channels" << std::endl;
+        size_t expected_chunks = (test_size_per_gpu + chunk_bytes - 1) / chunk_bytes;
+        std::cout << "[DEBUG] GPU " << gpu_id << " will post ~" << expected_chunks << " chunks" << std::endl;
 
         size_t offset = 0;
         int local_chunk_idx = 0;
@@ -619,21 +665,14 @@ int main(int argc, char** argv) {
           ChannelResources& ch = ctx.mgr->get_channel(channel_local_id);
           SlidingWindow* win = windows[gpu_id][channel_local_id];
 
-          // Sliding window: wait if channel is full
-          // Keep trying to release oldest until we have space
-          while (win->is_full()) {
-            int rc = win->try_release_oldest(ch.recv_comm, /*is_recv=*/true);
+          std::cout << "[DEBUG] GPU " << gpu_id << " chunk " << local_chunk_idx
+                    << " → channel " << channel_local_id
+                    << " (window size=" << win->size() << "/" << MAX_INFLIGHT_PER_CHANNEL << ")" << std::endl;
 
-            if (rc == 0) {
-              // Successfully released, window has space now
-              break;
-            } else if (rc == 1) {
-              // Not ready yet (not at front of TCPX queue), sleep and retry
-              std::this_thread::sleep_for(std::chrono::microseconds(10));
-            } else {
-              // Real error
-              std::cerr << "[ERROR] try_release_oldest failed for GPU " << gpu_id
-                        << " channel " << channel_local_id << std::endl;
+          // Sliding window: wait if channel is full
+          // Block until at least one request is released (draining as much as possible)
+          while (win->is_full()) {
+            if (!progress_channel(gpu_id, channel_local_id, ch, win, /*is_recv=*/true, /*blocking=*/true)) {
               return 1;
             }
           }
@@ -652,6 +691,9 @@ int main(int argc, char** argv) {
           void* recv_mhandles[1] = {ch.mhandle};
           void* recv_request = nullptr;
 
+          std::cout << "[DEBUG] GPU " << gpu_id << " chunk " << local_chunk_idx
+                    << " calling tcpx_irecv (size=" << this_chunk << ", tag=" << tag << ")..." << std::endl;
+
           if (tcpx_irecv(ch.recv_comm, 1, recv_data, recv_sizes, recv_tags,
                          recv_mhandles, &recv_request) != 0) {
             std::cerr << "[ERROR] tcpx_irecv failed (GPU " << gpu_id
@@ -659,8 +701,26 @@ int main(int argc, char** argv) {
             return 1;
           }
 
+          std::cout << "[DEBUG] GPU " << gpu_id << " chunk " << local_chunk_idx
+                    << " tcpx_irecv returned, request=" << recv_request << std::endl;
+
           // Add to sliding window (no CUDA event for simple memcpy mode)
           win->add_request(recv_request, local_chunk_idx, nullptr);
+
+          // ⭐ 关键：持续轮询所有 channel，驱动 TCPX 进度
+          // 完全按照原测试：非阻塞地尝试 drain 当前 channel 和其它 channel
+          if (!progress_channel(gpu_id, channel_local_id, ch, win, /*is_recv=*/true, /*blocking=*/false)) {
+            return 1;
+          }
+          for (int other_ch = 0; other_ch < num_channels; other_ch++) {
+            if (other_ch == channel_local_id) continue;
+            SlidingWindow* other_win = windows[gpu_id][other_ch];
+            if (other_win->size() == 0) continue;
+            ChannelResources& other_ch_res = ctx.mgr->get_channel(other_ch);
+            if (!progress_channel(gpu_id, other_ch, other_ch_res, other_win, /*is_recv=*/true, /*blocking=*/false)) {
+              return 1;
+            }
+          }
 
           offset += this_chunk;
           local_chunk_idx++;
@@ -683,6 +743,22 @@ int main(int argc, char** argv) {
 
           std::cout << "[SERVER] Draining GPU " << gpu_id << " channel " << channel_local_id
                     << " (" << win->size() << " pending)" << std::endl;
+      /*
+       * MEASUREMENT NOTE — server vs client bandwidth are not expected to be identical.
+       * What server-side number includes in this test:
+       *   - Time from first recv post of this iteration until drain_all() completes.
+       *   - Recv lifecycle requires tcpx_irecv_consumed() after done=1.
+       *   - Window limit here is 16 inflight/comm (deeper than client send=12).
+       * Reasons for asymmetry you may see:
+       *   (1) Pipeline depth difference (recv 16 vs send 12) affects steady-state rate.
+       *   (2) Progress cadence differences (per-comm tcpx_test frequency) can bottleneck one side.
+       *   (3) NUMA/NIC binding: if GPU↔NIC mapping differs between roles, throughput can differ.
+       *   (4) No app-level ACK needed (per Google) — so ACK is not the cause of gaps.
+       *   (5) Unpack path: if enabled in other tests, recv may do extra work before consumed.
+       * Vendor Guidance (2025-10-08): Prefer single 200Gbps NIC with ~8 TCPX conns when
+       * measuring per-NIC max; map GPU to NUMA-local NICs; one process per GPU (vLLM) → single NIC.
+       */
+
 
           if (win->drain_all(ch.recv_comm, /*is_recv=*/true) != 0) {
             std::cerr << "[ERROR] drain_all failed for GPU " << gpu_id
@@ -727,7 +803,7 @@ int main(int argc, char** argv) {
       ctx.mgr->deregister_memory(true);
       ctx.mgr->close_all(true);
     }
-    
+
   } else {
     // ========================================================================
     // CLIENT FLOW
@@ -770,7 +846,7 @@ int main(int argc, char** argv) {
       close(bootstrap_fd);
       std::cout << "[GPU " << gpu_id << "] Received " << all_handles[gpu_id].size() << " handles" << std::endl;
     }
-    
+
     // ========================================
     // Step 2: Connect to Server
     // ========================================
@@ -891,6 +967,10 @@ int main(int argc, char** argv) {
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "\n[CLIENT] ===== Iteration " << iter << " =====" << std::endl;
 
+      // PROGRESS STRATEGY (client/send): identical policy as server/recv
+      // - FIFO only; non-blocking after each post; blocking when the window is full
+      // - This mirrors process_completed_chunk()/wait_for_channel_capacity in multi-process test
+
       auto start = std::chrono::high_resolution_clock::now();
 
       // Clear sliding windows for this iteration
@@ -901,6 +981,25 @@ int main(int argc, char** argv) {
       }
 
       // Process all chunks with sliding window
+      // Helper: drain a channel's sliding window on the client (send side)
+      auto progress_channel = [&](int gpu, int ch_id, ChannelResources& ch, SlidingWindow* win,
+                                   bool is_recv, bool blocking) -> bool {
+        while (win->size() > 0) {
+          int rc = win->try_release_oldest(is_recv ? ch.recv_comm : ch.send_comm, is_recv);
+          if (rc == 0) {
+            continue;  // released one; keep draining
+          } else if (rc == 1) {
+            if (!blocking) return true;  // non-blocking: return to caller
+            std::this_thread::sleep_for(std::chrono::microseconds(10));
+          } else {
+            std::cerr << "[ERROR] progress_channel(send) failed for GPU " << gpu
+                      << " channel " << ch_id << std::endl;
+            return false;
+          }
+        }
+        return true;
+      };
+
       int global_chunk_idx = 0;
       for (int gpu_id = 0; gpu_id < kNumGPUs; gpu_id++) {
         GPUContext& ctx = gpus[gpu_id];
@@ -924,19 +1023,9 @@ int main(int argc, char** argv) {
           SlidingWindow* win = send_windows[gpu_id][channel_local_id];
 
           // Sliding window: wait if channel is full
-          // Keep trying to release oldest until we have space
+          // Block until at least one request is released (draining as much as possible)
           while (win->is_full()) {
-            int rc = win->try_release_oldest(ch.send_comm, /*is_recv=*/false);
-
-            if (rc == 0) {
-              // Successfully released, window has space now
-              break;
-            } else if (rc == 1) {
-              // Not ready yet (not at front of TCPX queue), sleep and retry
-              std::this_thread::sleep_for(std::chrono::microseconds(10));
-            } else {
-              // Real error
-              std::cerr << "[ERROR] try_release_oldest failed" << std::endl;
+            if (!progress_channel(gpu_id, channel_local_id, ch, win, /*is_recv=*/false, /*blocking=*/true)) {
               return 1;
             }
           }
@@ -959,6 +1048,35 @@ int main(int argc, char** argv) {
 
           // Add to sliding window
           win->add_request(send_request, local_chunk_idx, nullptr);
+
+          // ⭐ 关键：持续轮询所有 channel，驱动 TCPX 进度
+          // 完全按照原测试：非阻塞地尝试 drain 当前 channel 和其它 channel
+          if (!progress_channel(gpu_id, channel_local_id, ch, win, /*is_recv=*/false, /*blocking=*/false)) {
+            return 1;
+          }
+          for (int other_ch = 0; other_ch < num_channels; other_ch++) {
+            if (other_ch == channel_local_id) continue;
+            SlidingWindow* other_win = send_windows[gpu_id][other_ch];
+            if (other_win->size() == 0) continue;
+            ChannelResources& other_ch_res = ctx.mgr->get_channel(other_ch);
+            if (!progress_channel(gpu_id, other_ch, other_ch_res, other_win, /*is_recv=*/false, /*blocking=*/false)) {
+              return 1;
+            }
+      /*
+       * MEASUREMENT NOTE 4 client-side number measures send pipeline only.
+       * - Time window: from first send post to final drain of send windows.
+       * - Send requests auto-dequeue when done; no tcpx_irecv_consumed on client.
+       * - MAX inflight per channel here is 12 (smaller than server recv=16),
+       *   which can cap client-side steady-state BW.
+       * Practical implications:
+       *   - Do not expect identical GB/s on server and client; differences are normal.
+       *   - Raising send inflight (toward 16) and increasing tcpx_test cadence often
+       *     narrows the gap.
+       *   - Per Google: prefer single 200Gbps NIC + ~8 TCPX connections when measuring
+       *     per-NIC max; stick GPU to NUMA-local NIC; no app-level ACK needed.
+       */
+
+          }
 
           offset += this_chunk;
           local_chunk_idx++;
