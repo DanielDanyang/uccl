@@ -1,11 +1,36 @@
 # TCPX P2P Benchmark
 
-> PIVOT (2025-10-08): We are deprecating the single-process orchestrator path. Use the multi-process test with 4 TCPX connections per GPU.
-> Quick Start (per-GPU 4 conns):
-> - Server: `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0`
-> - Client: `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <SERVER_IP> 0`
-> Primary docs: [docs/AI_HANDOFF_PROMPT.md](docs/AI_HANDOFF_PROMPT.md), [HANDOFF_README.md](HANDOFF_README.md), [DEBUG_GUIDE.md](DEBUG_GUIDE.md), [REPORT_EXEC_SUMMARY_CN.md](REPORT_EXEC_SUMMARY_CN.md)
-
+> **UPDATE (2025-10-08)**: Multi-channel configuration!
+> **Key insight**: Each channel = 1 TCPX connection. Use multiple channels for pipeline parallelism.
+>
+> **Quick Start (Recommended - 4 connections per GPU)**:
+> ```bash
+> # Single GPU pair (GPU 0 on both nodes)
+> # Server
+> ./run_p2p_fullmesh.sh server 0
+>
+> # Client
+> ./run_p2p_fullmesh.sh client <SERVER_IP> 0
+>
+> # Full-mesh (all 8 GPUs)
+> # Server
+> ./run_p2p_fullmesh.sh server
+>
+> # Client
+> ./run_p2p_fullmesh.sh client <SERVER_IP>
+> ```
+>
+> **Architecture**:
+> - Each GPU: 4 TCPX connections (UCCL_TCPX_NUM_CHANNELS=4)
+> - Each connection: 1 socket (NCCL_NSOCKS_PERTHREAD=1)
+> - GPU → NIC mapping: {0,1}→eth1, {2,3}→eth2, {4,5}→eth3, {6,7}→eth4
+> - 2 GPUs share 1 NIC → 8 connections per NIC (MAX_SOCKETS=8)
+>
+> **Primary docs**:
+> - [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - 实施总结（中文）
+> - [docs/AI_HANDOFF_PROMPT.md](docs/AI_HANDOFF_PROMPT.md) - AI 交接文档
+> - [HANDOFF_README.md](HANDOFF_README.md) - 项目交接
+> - [DEBUG_GUIDE.md](DEBUG_GUIDE.md) - 调试指南
 
 GPU-to-GPU P2P communication using Google's TCPX (GPUDirect over TCP) for GCP A3-high instances.
 

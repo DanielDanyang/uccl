@@ -1,15 +1,20 @@
 /**
  * @file channel_manager.h
- * @brief Multi-channel TCPX connection manager
+ * @brief Multi-connection TCPX connection manager
  *
- * Manages lifecycle of multiple TCPX channels, each using a different NIC.
- * Mirrors NCCL's per-channel resource management (net.cc:84-142).
+ * Manages lifecycle of multiple TCPX connections for a single GPU.
+ *
+ * Architecture (2025-10-08 update):
+ * - Each GPU process creates 8 TCPX connections (not "channels")
+ * - These 8 connections are distributed across 2 NUMA-local NICs (4 per NIC)
+ * - Example: GPU0 → eth1 (4 conns) + eth2 (4 conns) = 8 total
+ * - Chunks are round-robin distributed across all 8 connections
  *
  * Key responsibilities:
- * - Create listen/connect for N channels
- * - Map channel_id to netDev (NIC index)
- * - Register shared GPU memory across all channels
- * - Provide round-robin channel selection for chunks
+ * - Create 8 independent TCPX connections (8× listen/connect)
+ * - Map connections to NUMA-local NICs (hardcoded GPU→NIC mapping)
+ * - Register shared GPU memory across all connections
+ * - Provide round-robin connection selection for chunks
  */
 
 #pragma once
@@ -25,11 +30,15 @@
 class SlidingWindow;
 
 /**
- * @brief Per-channel resources (mirrors NCCL's sendNetResources/recvNetResources)
+ * @brief Per-connection resources
+ *
+ * Each connection is an independent TCPX comm (listen/accept/connect).
+ * We create 8 of these per GPU, distributed across 2 NUMA-local NICs.
  */
 struct ChannelResources {
-  int channel_id;                    // Logical channel index (0..N-1)
-  int net_dev;                       // TCPX device index resolved from iface list
+  int channel_id;                    // Connection index (0..7 for 8 connections)
+  int net_dev;                       // TCPX device index (NIC)
+  std::string nic_name;              // NIC name (e.g., "eth1")
 
   // Connection handles
   void* listen_comm;                 // Server-side only
@@ -45,7 +54,7 @@ struct ChannelResources {
   // Memory registration
   void* mhandle;
 
-  // Sliding window helper (one per comm to mirror NCCL's inflight tracking)
+  // Sliding window helper (one per connection)
   SlidingWindow* sliding_window;
 
   // Statistics / debugging

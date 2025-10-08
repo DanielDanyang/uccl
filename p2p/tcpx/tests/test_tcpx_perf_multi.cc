@@ -178,9 +178,11 @@ int main(int argc, char** argv) {
   // 环境变量设置（TCPX 配置）
   // ============================================================================
 
-  // 运行建议（2025-10-08）：
+  // 运行建议（2025-10-08 更新）：
   // - 放弃单进程 orchestrator；本测试作为主路径推进
-  // - 每 GPU 建议 UCCL_TCPX_NUM_CHANNELS=4；如需测单 NIC 上限，可仅暴露一个 IFNAME 并维持 ~8 连接
+  // - 每 GPU 使用 UCCL_TCPX_NUM_CHANNELS=4（4 个独立的 TCPX connections）
+  // - 每个 channel = 1 个 TCPX connection（不使用 NCCL_NSOCKS_PERTHREAD）
+  // - 目标：每个 GPU 进程 4 个 connections，2 个 GPUs 共享 1 个 NIC = 8 个 connections per NIC
   // - 不必追求 send/recv 对称带宽；关注单向上限与总体规模化行为
 
   // 【关键】启用 zero-copy（从 4KB 开始使用 devmem-tcp）
@@ -220,8 +222,19 @@ int main(int argc, char** argv) {
   // 测试参数配置
   // ============================================================================
 
-  // Channel 数量（默认 1，推荐 4）
-  int num_channels = getEnvInt("UCCL_TCPX_NUM_CHANNELS", 1);
+  // Channel 数量（默认 4）
+  int num_channels = getEnvInt("UCCL_TCPX_NUM_CHANNELS", 4);
+
+  std::cout << "[PERF] ========================================" << std::endl;
+  std::cout << "[PERF] TCPX Connection Configuration:" << std::endl;
+  std::cout << "[PERF]   GPU ID: " << gpu_id << std::endl;
+  std::cout << "[PERF]   Connections per GPU: " << num_channels << std::endl;
+  std::cout << "[PERF]   Note: Each channel = 1 TCPX connection" << std::endl;
+  std::cout << "[PERF]   Note: 2 GPUs share 1 NIC → " << (num_channels * 2)
+            << " connections per NIC" << std::endl;
+  std::cout << "[PERF]   Target: Pipeline parallelism via multiple connections" << std::endl;
+  std::cout << "[PERF] ========================================" << std::endl;
+
     // === 路径总览（SERVER）===
     // 步骤 1: listen 并生成 handles（后续 bootstrap 发给 client）
     // 步骤 2: bootstrap：server_send_handles（一次性发完所有通道句柄）

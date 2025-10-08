@@ -8,46 +8,104 @@ Purpose: One-page, current, actionable context for next developer/AI. Legacy con
 
 > PIVOT (2025-10-08): Orchestrator path is deprecated for now. Proceed with the multi-process baseline and make each GPU open 4 TCPX connections (per vendor guidance: one channel ≈ one TCPX connection; prefer single 200Gbps NIC + ~8 connections for per-NIC max; GPU should stick to NUMA-local NIC).
 
-### New Working Plan (Multi-Process)
-- Target: multi-process benchmark only (tests/test_tcpx_perf_multi.cc)
-- Per-GPU connections: set UCCL_TCPX_NUM_CHANNELS=4 (each GPU opens 4 TCPX connections)
-- Run:
-  - Server (node0): `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0`
-  - Client (node1): `UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <NODE0_IP> 0`
-- Measurement: do not expect symmetric send/recv GB/s; client send window=12, server recv window=16; recv requires consumed; cadence and NUMA/NIC binding matter
+### New Working Plan (Multi-Process + Multi-Channel per GPU)
+- Target: multi-process benchmark (tests/test_tcpx_perf_multi.cc)
+- **CURRENT STATE**: Each GPU process opens 1 channel = 1 TCPX connection (insufficient pipeline)
+- **GOAL**: Each GPU process should open 4 channels = 4 TCPX connections
+  - Result: 2 GPUs sharing 1 NIC = 2×4 = 8 connections (hits MAX_SOCKETS=8, enables real pipeline)
+- **TASK**: Modify test_tcpx_perf_multi.cc to actually USE all 4 channels in parallel (not just create them)
+- Measurement: do not expect symmetric send/recv GB/s; focus on scaling with connection count
 - Orchestrator docs below are historical; keep for reference only
 
 ## Copy-paste this block to brief the next AI (start here)
 ```
 ROLE: You are the next AI developer taking over the NIXL-TCPX P2P benchmark.
-GOAL (pivoted): Use the multi-process baseline only and run with 4 TCPX connections per GPU. Orchestrator path is deprecated for now.
 
-DO NOW (2 nodes):
-1) Build on both nodes:
-   cd p2p/tcpx && make -j
-2) Run server on Node0:
-   UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0
-3) Run client on Node1:
-   UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <SERVER_IP> 0
-4) Expect send/recv bandwidth to be asymmetric (by design). Focus on stability and trend.
-5) If it stalls: enable TRACE (NCCL_DEBUG=INFO, NCCL_DEBUG_SUBSYS=NET,INIT, NCCL_GPUDIRECTTCPX_DEBUG_LEVEL=TRACE) and follow DEBUG_GUIDE.md.
+CONTEXT:
+- Platform: GCP A3-high, 2 nodes, 8× H100 per node, 4× gVNIC (eth1-4, 200Gbps each)
+- Current code: tests/test_tcpx_perf_multi.cc is multi-process baseline (one process per GPU, one channel per process)
+- Vendor guidance (Google, 2025-10-08):
+  * One channel ≈ one TCPX connection
+  * Prefer single 200Gbps NIC + ~8 TCPX connections for per-NIC max (~21.26 GB/s ceiling)
+  * MAX_SOCKETS=8 per process (TCPX plugin limit)
+  * GPU should stick to NUMA-local NIC (GPU0-3→eth1/eth2; GPU4-7→eth3/eth4)
+  * vLLM usage: one process per GPU, each process operates a single NIC
+
+PROBLEM (DIAGNOSED):
+- Previous misunderstanding: We thought "1 channel = 1 TCP connection"
+- **REALITY**: In TCPX, 1 channel (comm) can have MULTIPLE sockets (TCP connections)
+- The number of sockets per comm is controlled by: NCCL_NSOCKS_PERTHREAD × NCCL_SOCKET_NTHREADS
+- **Root cause of slow performance**: Default config creates channels with only 1 socket each
+- Example: UCCL_TCPX_NUM_CHANNELS=4 with default settings → 4 channels × 1 socket = 4 connections (not 8!)
+
+SOLUTION (IMPLEMENTED):
+- **Strategy A (Recommended)**: Use 1 channel with 8 sockets
+  - Set: UCCL_TCPX_NUM_CHANNELS=1, NCCL_NSOCKS_PERTHREAD=8, NCCL_SOCKET_NTHREADS=1
+  - Result: 1 channel × 8 sockets = 8 TCP connections per GPU
+
+- **Strategy B (Alternative)**: Use 2 channels with 4 sockets each
+  - Set: UCCL_TCPX_NUM_CHANNELS=2, NCCL_NSOCKS_PERTHREAD=4, NCCL_SOCKET_NTHREADS=1
+  - Result: 2 channels × 4 sockets = 8 TCP connections per GPU
+
+- **Auto-configuration**: test_tcpx_perf_multi.cc now automatically sets NCCL_NSOCKS_PERTHREAD
+  based on UCCL_TCPX_NUM_CHANNELS to target ~8 total sockets
+
+YOUR TASK:
+1) READ AND UNDERSTAND the current codebase thoroughly:
+   - tests/test_tcpx_perf_multi.cc (main test, has detailed Chinese comments)
+   - src/channel_manager.{h,cc} (how channels are created/managed)
+   - src/bootstrap.{h,cc} (how handles are exchanged)
+   - Understand: how does UCCL_TCPX_NUM_CHANNELS currently work? Where is it read? How are channels created?
+
+2) ANALYZE the gap:
+   - Current: ChannelManager creates N channels, but test only uses channel 0 (or round-robins poorly)
+   - Current: Each process binds to one GPU and one IFNAME (NIC)
+   - Current: Sliding window is per-channel, but we need to actually USE multiple channels in parallel
+   - Question: Does the current code already support multi-channel per process, or is it hardcoded to 1?
+
+3) DESIGN the solution (write a plan BEFORE coding):
+   - How to make each process actually post sends/recvs across all 4 channels in parallel?
+   - How to round-robin chunks across channels (like the orchestrator did)?
+   - How to manage 4 separate sliding windows per GPU process?
+   - How to ensure progress is driven on all 4 channels (not just channel 0)?
+   - How to verify 2 GPUs × 4 channels = 8 total TCPX connections on one NIC?
+
+4) IMPLEMENT incrementally:
+   - Start with UCCL_TCPX_NUM_CHANNELS=2, verify 2 connections work
+   - Scale to 4, verify 8 connections total (2 GPUs on same NIC)
+   - Measure bandwidth improvement vs single-channel baseline
+
+5) VALIDATE:
+   - Check logs: "created 4 channels" per GPU process
+   - Check TRACE: 8 distinct TCPX connections active on the NIC
+   - Check bandwidth: should approach ~21.26 GB/s for single-NIC max (vendor target)
+   - Check stability: no deadlocks, windows drain properly, iterations complete
 
 CONSTRAINTS:
-- Do not install new system packages without permission; tests/linters/builds OK.
-- Keep per-GPU connections at 4 via UCCL_TCPX_NUM_CHANNELS=4 (for now).
-- NUMA/NIC mapping can remain default; static mapping can be added later if needed.
+- Do not install new system packages without permission
+- Keep the multi-process model (one process per GPU)
+- Keep NUMA/NIC mapping as-is for now (can hardcode later if needed)
+- Preserve the existing progress/window/FIFO semantics (they are correct)
 
-SUCCESS CRITERIA (first pass):
-- Iteration 0 completes on both sides; windows drain as expected; no deadlocks.
-- Increasing data size shows reasonable scaling; per-NIC max on a single 200Gbps NIC tops near ~21.26 GB/s when using ~8 conns (vendor note).
+SUCCESS CRITERIA:
+- Each GPU process opens 4 TCPX connections (verified in logs/TRACE)
+- 2 GPUs sharing 1 NIC = 8 total connections (≤ MAX_SOCKETS=8)
+- Bandwidth scales with connection count (4 conns > 1 conn)
+- Iterations complete without deadlock; windows drain as expected
 
-KEY FILES:
-- tests/test_tcpx_perf_multi.cc (heavy Chinese comments explain windows/progress)
-- ../HANDOFF_README.md (runbook), ../DEBUG_GUIDE.md (TRACE triage)
+KEY FILES TO READ FIRST:
+- tests/test_tcpx_perf_multi.cc (current test, ~1100 lines, heavy Chinese comments)
+- src/channel_manager.cc (channel creation logic)
+- include/channel_manager.h (ChannelManager interface)
+- ../HANDOFF_README.md (runbook), ../DEBUG_GUIDE.md (TRACE/troubleshooting)
+- ../REPORT_EXEC_SUMMARY_CN.md (中文项目概览)
 
-FOLLOW-UPS (optional):
-- Collect a short run log with TRACE enabled and summarize rc/done patterns.
-- If needed, propose static GPU→NIC mapping and per-GPU NUMA pinning (per vendor guidance).
+START BY:
+1. Reading tests/test_tcpx_perf_multi.cc completely (understand current flow)
+2. Tracing how UCCL_TCPX_NUM_CHANNELS is used (grep for it)
+3. Understanding the current channel selection logic (is it round-robin? single-channel?)
+4. Writing a detailed plan with code locations and proposed changes
+5. Discussing the plan with the user before implementing
 ```
 
 
@@ -57,24 +115,30 @@ FOLLOW-UPS (optional):
 - Interface: Google nccl-plugin-gpudirecttcpx (TCPX / GPUDirect over TCP)
 - Architecture: Multi-process baseline (one process per GPU). Orchestrator is deprecated for now.
 
-## Current Status
+## Current Status & Problem
 - Working path: multi-process test (tests/test_tcpx_perf_multi.cc)
-- Data plane: async + sliding window + continuous progress; FIFO-only tcpx_test on head; recv calls tcpx_irecv_consumed()
+- **PROBLEM**: Current code only uses 1 channel per GPU process = 1 TCPX connection (no real pipeline)
+- **GOAL**: Make each GPU process use 4 channels = 4 TCPX connections in parallel
+  - This enables: 2 GPUs × 4 channels = 8 connections on one NIC (hits MAX_SOCKETS=8, vendor target)
+- Data plane semantics are correct: async + sliding window + continuous progress; FIFO-only tcpx_test; recv calls consumed
 - Windows: recv per-comm=16; send per-comm=12
 - Debugging: TRACE instructions ready; rc/done/size logs in tests
-- External: Guidance from Google applied (prefer per-NIC max on single NIC with ~8 conns; NUMA-local NIC mapping; no app-level ACK)
+- External: Guidance from Google applied (prefer ~8 conns per NIC for max throughput ~21.26 GB/s)
 
-## How to Run (2 nodes, multi-process baseline)
+## How to Run (current baseline - single channel per GPU)
 ```bash
 # Build (on both nodes)
 cd p2p/tcpx
 make -j
 
-# Server (Node 0)
-UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi server 0
+# Server (Node 0) - currently only uses 1 channel even if you set UCCL_TCPX_NUM_CHANNELS=4
+./tests/test_tcpx_perf_multi server 0
 
 # Client (Node 1)
-UCCL_TCPX_NUM_CHANNELS=4 ./tests/test_tcpx_perf_multi client <SERVER_IP> 0
+./tests/test_tcpx_perf_multi client <SERVER_IP> 0
+
+# NOTE: Setting UCCL_TCPX_NUM_CHANNELS=4 creates 4 channels but test doesn't USE them in parallel yet
+# This is what needs to be fixed!
 
 # Optional diagnostics
 export NCCL_DEBUG=INFO
@@ -82,11 +146,21 @@ export NCCL_DEBUG_SUBSYS=NET,INIT
 export NCCL_GPUDIRECTTCPX_DEBUG_LEVEL=TRACE
 ```
 
-## What Good Looks Like
-- Server: first 16 recvs posted; logs show requests being released; Iteration 0 completes
-- Client: "released send request …" messages continue; Iteration 0 completes; bandwidth printed
+## What Good Looks Like (after fix)
+- Logs show: "created 4 channels" per GPU process
+- TRACE shows: 8 distinct TCPX connections active when 2 GPUs share 1 NIC
+- Server: recvs posted across all 4 channels; windows drain on all channels; Iteration 0 completes
+- Client: sends posted across all 4 channels; bandwidth scales with connection count (4 conns > 1 conn)
+- Bandwidth approaches ~21.26 GB/s for single-NIC max (vendor target with ~8 connections)
 
-## If It Stalls (most common)
+## If It Stalls (after implementing multi-channel)
+- Symptom: Only channel 0 shows activity; channels 1-3 idle
+  - Action: Verify round-robin logic actually distributes chunks across all channels
+  - Action: Check that progress is driven on ALL channels, not just channel 0
+- Symptom: Deadlock when using multiple channels
+  - Action: Verify each channel has its own sliding window (not shared)
+  - Action: Verify opportunistic drain covers all channels
+  - Action: Check that FIFO-only testing is per-channel (not global)
 - Symptom: Server window stuck at 16/16; tcpx_test logs show rc=0, done=0 repeatedly
   - Action: Confirm progress_channel() is called non-blocking after each post (current + all other channels)
   - Action: Confirm window-full path uses progress_channel(blocking=true)
@@ -116,12 +190,14 @@ export NCCL_GPUDIRECTTCPX_DEBUG_LEVEL=TRACE
 - vLLM mode: one process per GPU; each process operates a single NIC
 - Keep NCCL’s threading mechanism for now; no app-level ACK required (simple send/recv is sufficient)
 
-## Next Steps (checklist)
-- [ ] Run minimal case with CHANNELS=1 and verify Iteration 0 completes
-- [ ] Scale channels and record per-GPU bandwidth; confirm release pattern persists
-- [ ] If stalls persist, collect TRACE (NET,INIT + TCPX TRACE) and correlate with rc/done/size logs
-- [ ] Integrate any Google feedback (channel→socket, cadence, consumed timing)
-- [ ] Consider a dedicated progress thread per-comm if cadence still insufficient in single-process
+## Next Steps (checklist for next AI)
+- [ ] READ tests/test_tcpx_perf_multi.cc completely and understand current flow
+- [ ] TRACE how UCCL_TCPX_NUM_CHANNELS is used (grep for it in all files)
+- [ ] UNDERSTAND current channel selection logic (is it round-robin? single-channel only?)
+- [ ] WRITE a detailed implementation plan with code locations and proposed changes
+- [ ] DISCUSS the plan with user before implementing
+- [ ] IMPLEMENT incrementally: start with 2 channels, verify, then scale to 4
+- [ ] VALIDATE: check logs show "4 channels created", TRACE shows 8 connections (2 GPUs × 4), bandwidth scales
 
 ## Pointers to Detail
 - Handoff overview: p2p/tcpx/HANDOFF_README.md
