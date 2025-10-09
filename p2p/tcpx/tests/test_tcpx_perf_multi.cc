@@ -449,11 +449,11 @@ int main(int argc, char** argv) {
 
       tcpx::device::UnpackLaunchConfig cfg;
       cfg.stream = unpack_stream;
-      cfg.enable_profiling = false;
+      cfg.enable_profiling = true;  // Enable profiling to measure kernel time
       cfg.use_small_kernel = true;
       launcher_ptr = new tcpx::device::UnpackLauncher(cfg);
 
-      std::cout << "[PERF] Created persistent stream and launcher for kernel mode" << std::endl;
+      std::cout << "[PERF] Created persistent stream and launcher for kernel mode (profiling enabled)" << std::endl;
     }
 
     // ==========================================================================
@@ -719,6 +719,10 @@ int main(int argc, char** argv) {
     int completed_iters = 0;
     bool abort_benchmark = false;
 
+    // Kernel timing statistics (only for kernel mode)
+    double total_kernel_time_ms = 0.0;
+    uint64_t total_kernel_launches = 0;
+
     for (int iter = 0; iter < iterations; ++iter) {
       std::cout << "[PERF] Iteration " << iter << ": total bytes=" << test_size
                 << ", chunk_bytes=" << chunk_bytes << std::endl;
@@ -909,12 +913,49 @@ int main(int argc, char** argv) {
 
       auto end = std::chrono::high_resolution_clock::now();
       double iter_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+      // Get kernel statistics for this iteration (only for kernel mode)
+      if (impl == "kernel" && launcher_ptr) {
+        const auto& stats = launcher_ptr->getStats();
+        double iter_kernel_time_ms = stats.total_time_ms;
+        uint64_t iter_kernel_launches = stats.launches;
+
+        if (!iteration_failed && !abort_benchmark) {
+          total_kernel_time_ms += iter_kernel_time_ms;
+          total_kernel_launches += iter_kernel_launches;
+
+          double kernel_percentage = (iter_kernel_time_ms / iter_time_ms) * 100.0;
+          double avg_kernel_time_us = (iter_kernel_launches > 0) ?
+                                      (iter_kernel_time_ms * 1000.0 / iter_kernel_launches) : 0.0;
+
+          std::cout << "[PERF] Iter " << iter << " time=" << std::fixed << std::setprecision(2)
+                    << iter_time_ms << " ms"
+                    << ", kernel_time=" << iter_kernel_time_ms << " ms ("
+                    << std::fixed << std::setprecision(1) << kernel_percentage << "%)"
+                    << ", launches=" << iter_kernel_launches
+                    << ", avg_kernel=" << std::fixed << std::setprecision(2) << avg_kernel_time_us << " μs"
+                    << std::endl;
+        } else {
+          std::cerr << "[ERROR] Iter " << iter << " aborted after " << iter_time_ms << " ms" << std::endl;
+        }
+
+        // Reset stats for next iteration
+        launcher_ptr->resetStats();
+      } else {
+        // Non-kernel mode or no launcher
+        if (!iteration_failed && !abort_benchmark) {
+          total_time_ms += iter_time_ms;
+          ++completed_iters;
+          std::cout << "[PERF] Iter " << iter << " time=" << std::fixed << std::setprecision(2)
+                    << iter_time_ms << " ms" << std::endl;
+        } else {
+          std::cerr << "[ERROR] Iter " << iter << " aborted after " << iter_time_ms << " ms" << std::endl;
+        }
+      }
+
       if (!iteration_failed && !abort_benchmark) {
         total_time_ms += iter_time_ms;
         ++completed_iters;
-        std::cout << "[PERF] Iter " << iter << " time=" << iter_time_ms << "ms" << std::endl;
-      } else {
-        std::cerr << "[ERROR] Iter " << iter << " aborted after " << iter_time_ms << "ms" << std::endl;
       }
 
       if (abort_benchmark) {
@@ -943,6 +984,30 @@ int main(int argc, char** argv) {
       std::cout << "[PERF] Avg (" << completed_iters << " iter): "
                 << std::fixed << std::setprecision(3) << avg_ms << " ms, "
                 << "BW: " << std::fixed << std::setprecision(2) << bw_gbps << " GB/s" << std::endl;
+
+      // Print kernel statistics (only for kernel mode)
+      if (impl == "kernel" && total_kernel_launches > 0) {
+        double avg_kernel_time_ms = total_kernel_time_ms / completed_iters;
+        double kernel_percentage = (total_kernel_time_ms / total_time_ms) * 100.0;
+        double avg_kernel_time_us = (total_kernel_time_ms * 1000.0) / total_kernel_launches;
+        double avg_launches_per_iter = static_cast<double>(total_kernel_launches) / completed_iters;
+
+        std::cout << "[PERF] Kernel stats:" << std::endl;
+        std::cout << "  - Avg kernel time per iter: " << std::fixed << std::setprecision(2)
+                  << avg_kernel_time_ms << " ms ("
+                  << std::fixed << std::setprecision(1) << kernel_percentage << "% of total)" << std::endl;
+        std::cout << "  - Total kernel launches: " << total_kernel_launches
+                  << " (avg " << std::fixed << std::setprecision(1) << avg_launches_per_iter << " per iter)" << std::endl;
+        std::cout << "  - Avg kernel time per launch: " << std::fixed << std::setprecision(2)
+                  << avg_kernel_time_us << " μs" << std::endl;
+
+        // Calculate non-kernel overhead
+        double avg_non_kernel_ms = avg_ms - avg_kernel_time_ms;
+        double non_kernel_percentage = (avg_non_kernel_ms / avg_ms) * 100.0;
+        std::cout << "  - Avg non-kernel overhead: " << std::fixed << std::setprecision(2)
+                  << avg_non_kernel_ms << " ms ("
+                  << std::fixed << std::setprecision(1) << non_kernel_percentage << "%)" << std::endl;
+      }
     } else {
       std::cerr << "[ERROR] No successful iterations recorded" << std::endl;
     }
