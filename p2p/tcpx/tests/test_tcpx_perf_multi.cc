@@ -375,6 +375,11 @@ int main(int argc, char** argv) {
     const char* impl_env = std::getenv("UCCL_TCPX_UNPACK_IMPL");
     std::string impl = impl_env ? std::string(impl_env) : std::string("kernel");
     std::transform(impl.begin(), impl.end(), impl.begin(), ::tolower);
+    if (impl != "kernel" && impl != "d2d" && impl != "host" && impl != "none") {
+      std::cout << "[WARN] Unknown UCCL_TCPX_UNPACK_IMPL='" << impl
+                << "', falling back to 'kernel'" << std::endl;
+      impl = "kernel";
+    }
     std::cout << "[PERF] Unpack impl: " << impl << std::endl;
 
     // ==========================================================================
@@ -564,6 +569,14 @@ int main(int argc, char** argv) {
 
         std::cout << "[DEBUG][SERVER] Chunk " << entry.global_idx
                   << " recv completed (received_size=" << received_size << ")" << std::endl;
+
+        // Ablation mode: skip any unpack work and immediately consume the recv.
+        if (impl == "none") {
+          tcpx_irecv_consumed(ch.recv_comm, 1, entry.request);
+          win.inflight_recvs.pop_front();
+          // Proceed to next FIFO head (if any)
+          continue;
+        }
 
         auto* rx_req = reinterpret_cast<tcpx::plugin::tcpxRequest*>(entry.request);
         auto* dev_handle_struct = reinterpret_cast<tcpx::plugin::NcclNetDeviceHandle*>(ch.recv_dev_handle);
